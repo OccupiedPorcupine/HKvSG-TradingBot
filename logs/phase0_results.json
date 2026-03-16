@@ -1,0 +1,69 @@
+{
+  "timestamp_utc": "2026-03-15T10:17:48.544524+00:00",
+  "tests": {
+    "data_fields": {
+      "status": "pass",
+      "data": {
+        "all_fields": [
+          "MaxBid",
+          "MinAsk",
+          "LastPrice",
+          "Change",
+          "CoinTradeValue",
+          "UnitTradeValue"
+        ],
+        "has_volume_data": true,
+        "has_volume_fields": {
+          "CoinTradeValue": true,
+          "UnitTradeValue": true
+        },
+        "volume_populated": true,
+        "volume_samples": {
+          "BTC/USD": {
+            "CoinTradeValue": 11498.84694,
+            "UnitTradeValue": 818072267.5930412
+          },
+          "ETH/USD": {
+            "CoinTradeValue": 131770.2762,
+            "UnitTradeValue": 275619659.874507
+          },
+          "DOGE/USD": {
+            "CoinTradeValue": 638441662,
+            "UnitTradeValue": 61077788.58228
+          }
+        },
+        "has_bid_ask": true,
+        "has_last_price": true,
+        "has_change_24h": true,
+        "spread_analysis": {
+          "BTC/USD": {
+            "bid": 71814.29,
+            "ask": 71814.3,
+            "last": 71814.29,
+            "spread_bps": 0.0,
+            "bid_eq_ask": false,
+            "last_eq_bid": true
+          },
+          "ETH/USD": {
+            "bid": 2116.21,
+            "ask": 2116.22,
+            "last": 2116.21,
+            "spread_bps": 0.05,
+            "bid_eq_ask": false,
+            "last_eq_bid": true
+          }
+        },
+        "sample_ticker": {
+          "1000CHEEMS/USD": {
+            "MaxBid": 0.000484,
+            "MinAsk": 0.000485,
+            "LastPrice": 0.000484,
+            "Change": -0.0321,
+            "CoinTradeValue": 1409216928,
+            "UnitTradeValue": 682894.3657
+          }
+        }
+      }
+    }
+  }
+}
