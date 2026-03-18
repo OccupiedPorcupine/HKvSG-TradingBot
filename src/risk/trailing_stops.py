@@ -153,48 +153,35 @@ class TrailingStopManager:
 
     def compute_effective_stop(
         self,
-        base_stop_pct: float,
-        daily_pnl_pct: float = 0.0,
+        pos: PositionStop,
+        current_price: float,
         endgame_stop_override: Optional[float] = None,
     ) -> float:
-        """Compute effective stop distance after tightening.
-
-        Applies dynamic tightening based on daily P&L and end-game override,
-        then enforces the minimum floor.
-
-        Args:
-            base_stop_pct: Base stop distance for the asset's tier.
-            daily_pnl_pct: Current daily P&L as fraction (e.g., 0.025 = +2.5%).
-            endgame_stop_override: End-game schedule stop override, or None.
-
-        Returns:
-            Effective stop distance (fraction), never below min_stop_floor.
-        """
-        # Dynamic tightening based on daily P&L (Phase 2+)
-        tightened = base_stop_pct
-        if self._tightening_config is not None:
-            high_threshold = self._tightening_config.get("threshold_high_pnl", 0.02)
+        """Compute effective stop distance after tightening based on PER-POSITION P&L."""
+        tightened = pos.base_stop_pct
+        
+        if self._tightening_config is not None and pos.entry_price > 0:
+            # Calculate unrealized P&L for THIS specific position
+            unrealized_pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+            
+            high_threshold = self._tightening_config.get("threshold_high_pnl", 0.05)
             high_tighten = self._tightening_config.get("tightening_high", 0.40)
-            med_threshold = self._tightening_config.get("threshold_medium_pnl", 0.01)
+            med_threshold = self._tightening_config.get("threshold_medium_pnl", 0.025)
             med_tighten = self._tightening_config.get("tightening_medium", 0.20)
 
-            if daily_pnl_pct > high_threshold:
-                tightened = base_stop_pct * (1.0 - high_tighten)
-            elif daily_pnl_pct > med_threshold:
-                tightened = base_stop_pct * (1.0 - med_tighten)
+            if unrealized_pnl_pct > high_threshold:
+                tightened = pos.base_stop_pct * (1.0 - high_tighten)
+            elif unrealized_pnl_pct > med_threshold:
+                tightened = pos.base_stop_pct * (1.0 - med_tighten)
 
-        # End-game override takes effect if tighter than dynamic tightening
         if endgame_stop_override is not None:
             tightened = min(tightened, endgame_stop_override)
 
-        # Enforce minimum floor
-        effective = max(tightened, self.min_stop_floor)
-        return effective
+        return max(tightened, self.min_stop_floor)
 
     def check_all(
         self,
         current_prices: dict[str, float],
-        daily_pnl_pct: float = 0.0,
         endgame_stop_override: Optional[float] = None,
     ) -> list[RiskEvent]:
         """Check all positions against their trailing stops.
@@ -219,9 +206,9 @@ class TrailingStopManager:
             # Update high watermark
             pos.update_peak(price)
 
-            # Compute effective stop with all tightening
+            # Compute effective stop with all tightening (passing pos and price)
             effective_pct = self.compute_effective_stop(
-                pos.base_stop_pct, daily_pnl_pct, endgame_stop_override
+                pos, price, endgame_stop_override
             )
 
             if pos.is_triggered(price, effective_pct):
