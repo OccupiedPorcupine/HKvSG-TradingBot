@@ -20,7 +20,7 @@ from src.regime.detector import RegimeDetector
 from src.regime.regime_state import RegimeState
 from src.regime.contagion import ContagionResult
 from src.signals.momentum import MomentumSignal
-from src.portfolio.factory import create_portfolio_constructor, get_current_weights
+from src.portfolio.factory import create_portfolio_constructor, get_current_weights, build_orders_from_weights
 from src.risk.factory import create_risk_manager
 from src.execution.roostoo_client import ExecutionClient
 from src.execution.position_tracker import PositionTracker
@@ -201,8 +201,7 @@ async def main():
         # Run 1-min risk checks
         risk_events = risk_manager.tick(
             current_prices=current_prices,
-            tracker=position_tracker,
-            daily_pnl_pct=risk_manager.breakers.get_daily_pnl_pct(position_tracker.nav)
+            tracker=position_tracker
         )
         
         # Convert RiskEvents to Orders
@@ -295,36 +294,19 @@ async def main():
             target_weights, max_deployment
         )
         
-        # 4. Queue Orders
-        # (Convert weight diffs to USD orders)
+        ## 4. Queue Orders
+        # (Convert weight diffs to USD orders via factory bridge)
+        pending_orders = build_orders_from_weights(
+            target_weights=final_weights,
+            current_weights=current_weights,
+            nav=position_tracker.nav,
+            pair_suffix=config.get("universe.pair_suffix", "/USD")
+        )
         
-        for asset, target_w in final_weights.items():
-            current_w = current_weights.get(asset, 0.0)
-            diff_w = target_w - current_w
-            
-            # Threshold check
-            if abs(diff_w) < config.get("portfolio.min_trade_threshold_pct_nav", 0.002):
-                continue
-                
-            qty_usd = diff_w * position_tracker.nav
-    
-            
-            current_w = current_weights.get(asset, 0.0)
-            if qty_usd > 0:
-                priority = OrderPriority.NEW_ENTRY if current_w < 0.001 else OrderPriority.SIZE_ADJUSTMENT
-            else:
-                priority = OrderPriority.POSITION_REDUCTION if target_w < 0.001 else OrderPriority.SIZE_ADJUSTMENT
-
-            order = PendingOrder(
-                asset=asset,
-                pair=config.pair_for(asset),
-                side="BUY" if qty_usd > 0 else "SELL",
-                quantity_usd=abs(qty_usd),
-                priority=priority,
-                trigger="STRATEGY_REBALANCE",
-                target_weight=target_w
-            )
-            order_queue.add(order)
+        for order in pending_orders:
+            # Re-apply global min_trade_threshold just in case
+            if order.quantity_usd >= (position_tracker.nav * config.get("portfolio.min_trade_threshold_pct_nav", 0.002)):
+                order_queue.add(order)
             
         # 5. Execute
         await order_manager.process_queue()
