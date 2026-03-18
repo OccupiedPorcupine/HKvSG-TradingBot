@@ -103,7 +103,7 @@ class RiskManager:
 
         # --- 1. Trailing stops ---
         stop_events = self.stops.check_all(
-            current_prices, daily_pnl_pct, endgame_stop_override
+            current_prices, endgame_stop_override
         )
         events.extend(stop_events)
 
