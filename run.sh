@@ -1,0 +1,1 @@
+set -a && source .env && set +a && PYTHONPATH=. python src/main.py

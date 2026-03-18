@@ -449,7 +449,7 @@ orchestration:
 # LOGGING
 # -----------------------------------------------------------------------------
 logging:
-  level: "INFO"
+  level: "DEBUG"
   directory: "logs"
   main_log: "logs/apex.log"
   trade_log: "logs/trades.jsonl"

@@ -17,6 +17,7 @@ from src.data.ingestion import DataIngestionManager
 from src.data.features import FeatureEngine
 from src.regime.detector import RegimeDetector
 from src.regime.regime_state import RegimeState
+from src.regime.contagion import ContagionResult
 from src.signals.momentum import MomentumSignal
 from src.portfolio.factory import create_portfolio_constructor, get_current_weights
 from src.risk.factory import create_risk_manager
@@ -38,17 +39,19 @@ def setup_logging(config: Config):
     log_cfg = config.get("logging", {})
     log_dir = Path(log_cfg.get("directory", "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     log_file = log_dir / "apex.log"
-    
-    logging.basicConfig(
-        level=getattr(logging, log_cfg.get("level", "INFO")),
-        format=log_cfg.get("format", "%(asctime)s [%(levelname)s] %(name)s: %(message)s"),
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    fmt = log_cfg.get("format", "%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    level = getattr(logging, log_cfg.get("level", "INFO"))
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+    root.addHandler(logging.FileHandler(log_file))
+    root.addHandler(logging.StreamHandler(sys.stdout))
+    for handler in root.handlers:
+        handler.setFormatter(logging.Formatter(fmt))
+
     return logging.getLogger("apex")
 
 logger = logging.getLogger("apex")
@@ -61,9 +64,6 @@ async def main():
     # 1. Load basic config and setup logging
     project_root = Path(__file__).resolve().parent.parent
     config_path = project_root / "config.yaml"
-    
-    # We use a temp logger before full setup
-    logging.basicConfig(level=logging.INFO)
     
     try:
         # 2. Pre-flight checks (gated startup)
@@ -216,11 +216,12 @@ async def main():
 
     async def regime_update_tick():
         """Every 5m: Update market regime."""
-        # Phase 1: Minimal vol guard or hardcoded BULL
-        # (detector.update uses inputs from feature_engine)
+        if feature_engine._regime_inputs is None:
+            logger.debug("Regime update skipped — waiting for first price bar.")
+            return
         regime_detector.update(
             feature_engine.get_regime_inputs(),
-            None # Contagion result handled internally in Phase 2
+            ContagionResult(contagion_ratio=0.0, avg_loss=0.0, negative_count=0, total_positions=0)
         )
         logger.debug("Regime updated: %s", regime_detector.state.current_regime)
 
@@ -228,6 +229,9 @@ async def main():
         """Every 60m: Re-rank signals and rebalance portfolio."""
         if not system_state.can_rebalance:
             logger.warning("Rebalance skipped due to system safe-mode or stale data.")
+            return
+        if feature_engine._regime_inputs is None:
+            logger.info("Rebalance skipped — waiting for first price bar.")
             return
 
         # 1. Signals
@@ -313,24 +317,25 @@ async def main():
 
     # 6. Graceful Shutdown
     loop = asyncio.get_running_loop()
-    
+    shutdown_event = asyncio.Event()
+
     def shutdown_handler():
         logger.info("Shutdown signal received...")
-        asyncio.create_task(scheduler.stop_all())
-        decision_logger.close()
-        # In a real system we might want to cancel all orders here
-        
+        shutdown_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
 
     logger.info("APEX main loop started. Press Ctrl+C to stop.")
-    
-    # Keep the main coroutine alive
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        logger.info("Main loop cancelled.")
+
+    # Block until shutdown signal
+    await shutdown_event.wait()
+
+    # Clean up
+    await scheduler.stop_all()
+    await decision_logger.flush()
+    decision_logger.close()
+    logger.info("APEX shutdown complete.")
 
 if __name__ == "__main__":
     try:
