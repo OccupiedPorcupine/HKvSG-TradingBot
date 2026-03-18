@@ -57,7 +57,8 @@ def reconstruct_positions(
                         # Calculate effective commission percentage
                         # (Defaults to 0.05% if commission_paid is missing or 0)
                         comm_pct = 0.0
-                        if commission_paid and fill_price and filled_qty:
+                        
+                        if commission_paid is not None and fill_price and filled_qty:
                             comm_pct = commission_paid / (fill_price * filled_qty)
                         elif entry.get("order_type") == "LIMIT":
                             comm_pct = 0.0005
