@@ -238,6 +238,12 @@ class OrderManager:
 
         # Calculate quantity from USD amount
         quantity = abs(pending.quantity_usd) / price
+        
+        # Safeguard: never attempt to sell more than we actually hold
+        if pending.side == "SELL":
+            pos = self.position_tracker.get_position(pending.asset)
+            if pos and quantity > pos.quantity:
+                quantity = pos.quantity
 
         # Log the decision
         current_weight = self.position_tracker.get_weight(pending.asset)
