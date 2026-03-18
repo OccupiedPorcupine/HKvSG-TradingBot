@@ -93,6 +93,7 @@ class ExecutionClient:
         """
         self.client = client
         self.pair_info: dict[str, PairInfo] = {}
+        self.initial_wallet_usd: float = 0.0
 
     async def load_exchange_info(self) -> dict[str, PairInfo]:
         """Fetch and cache exchange info for all trading pairs.
@@ -105,6 +106,11 @@ class ExecutionClient:
         """
         resp = await self.client.get_exchange_info()
         trade_pairs = resp.get("TradePairs", {})
+
+        # Read the true starting wallet balance from exchange
+        self.initial_wallet_usd = float(resp.get("InitialWallet", {}).get("USD", 0.0))
+        if self.initial_wallet_usd > 0:
+            logger.info("InitialWallet from exchange: USD=$%.2f", self.initial_wallet_usd)
 
         self.pair_info.clear()
         for pair_name, info in trade_pairs.items():

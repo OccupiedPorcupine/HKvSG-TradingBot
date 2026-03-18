@@ -295,7 +295,7 @@ portfolio:
   min_trade_threshold_pct_nav: 0.002     # 0.2% of NAV = $2,000 at start
 
   # rebalance cadence
-  rebalance_cadence_sec: 3600            # 60 min (can tune to 1800 = 30 min)
+  rebalance_cadence_sec: 120            # 60 min (can tune to 1800 = 30 min)
 
 # -----------------------------------------------------------------------------
 # END-GAME DE-RISKING (Layer 5, hardcoded schedule)
@@ -456,6 +456,18 @@ logging:
   snapshot_log: "logs/snapshots.jsonl"
   heartbeat_file: "logs/heartbeat"
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+# -----------------------------------------------------------------------------
+# DEBUG TICK — temporary price heartbeat logged every 60s
+# Set enabled: false before competition
+# -----------------------------------------------------------------------------
+debug_tick:
+  enabled: true
+  watch_assets:          # any subset of the 67 tickers
+    - BTC
+    - ETH
+    - SOL
+    - DOGE
 
 # -----------------------------------------------------------------------------
 # PATHS

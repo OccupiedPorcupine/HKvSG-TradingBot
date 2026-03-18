@@ -13,6 +13,7 @@ from pathlib import Path
 
 from apex.core.config import Config
 from src.data.api_client import RoostooClient
+from src.data.binance_client import BinancePriceClient
 from src.data.ingestion import DataIngestionManager
 from src.data.features import FeatureEngine
 from src.regime.detector import RegimeDetector
@@ -24,7 +25,7 @@ from src.risk.factory import create_risk_manager
 from src.execution.roostoo_client import ExecutionClient
 from src.execution.position_tracker import PositionTracker
 from src.execution.decision_logger import DecisionLogger
-from src.execution.priority_queue import OrderPriorityQueue
+from src.execution.priority_queue import OrderPriorityQueue, OrderPriority, PendingOrder
 from src.execution.order_manager import OrderManager, OrderManagerConfig
 
 from src.orchestration.startup import run_preflight_checks, PreFlightCheckError
@@ -91,23 +92,33 @@ async def main():
         api_secret_env=config.get("api.secret_env_var", "ROOSTOO_API_SECRET")
     )
     exec_client = ExecutionClient(base_client)
-    
+
+    # Load exchange info into exec_client (required before placing any orders)
+    await exec_client.load_exchange_info()
+
     # Decision Logger
     decision_logger = DecisionLogger(
         log_path=config.get("logging.trade_log", "logs/trades.jsonl")
     )
-    
-    # Position Tracker (with recovery)
+
+    # Starting capital: prefer InitialWallet from exchange (ground truth), fall back to config
     starting_capital = config.get("competition.starting_capital_usd", 1_000_000)
+    if exec_client.initial_wallet_usd > 0:
+        starting_capital = exec_client.initial_wallet_usd
+        logger.info("Starting capital from exchange InitialWallet: $%.2f", starting_capital)
+    else:
+        logger.warning("InitialWallet not available from exchange; using config value $%.0f", starting_capital)
+
     position_tracker = PositionTracker(starting_capital=starting_capital)
-    
+
     # Crash Recovery: Positions
     if raw_config_dict.get("recovery_trade_log_exists"):
         reconstruct_positions(position_tracker, Path(decision_logger.log_path))
 
-    # Data Ingestion & Features
-    ingestion = DataIngestionManager(config.raw, base_client)
-    await ingestion.initialize() # Discovers universe, reloads Parquet
+    # Data Ingestion & Features — prices from Binance, orders via Roostoo
+    binance_client = BinancePriceClient()
+    ingestion = DataIngestionManager(config.raw, base_client, binance_client=binance_client)
+    await ingestion.initialize()  # Discovers universe, builds Binance symbol map, reloads Parquet
     
     feature_engine = FeatureEngine(config.raw, ingestion)
     
@@ -141,17 +152,40 @@ async def main():
 
     # 4. Job Definitions
     
+    # Debug tick config
+    debug_tick_enabled = config.get("debug_tick.enabled", False)
+    debug_watch = config.get("debug_tick.watch_assets", [])
+
     async def data_ingestion_tick():
         """Every 60s: Fetch prices, update features, run risk checks."""
         # 1. Ingest
         await ingestion.fetch_prices()
-        
+
         # 2. Features
         feature_engine.on_new_bar()
-        
-        # 3. Update Order Manager Prices
-        prices = {config.pair_for(a): ingestion.get_latest_price(a) 
-                  for a in ingestion.get_all_assets() 
+
+        # 3. Debug heartbeat (disable before competition)
+        if debug_tick_enabled and debug_watch:
+            parts = []
+            for asset in debug_watch:
+                price = ingestion.get_latest_price(asset)
+                parts.append(f"{asset}={price:.4f}" if price else f"{asset}=N/A")
+            logger.info("TICK [%d assets] %s", len(ingestion.get_all_assets()), "  ".join(parts))
+
+        # 4. Portfolio snapshot
+        snap = position_tracker.snapshot()
+        logger.info(
+            "PORTFOLIO  NAV=$%.2f  cash=$%.2f  exposure=%.1f%%  positions=%d  daily_pnl=%.2f%%",
+            snap["nav"],
+            snap["nav"] * (1 - snap["crypto_exposure"]),
+            snap["crypto_exposure"] * 100,
+            snap["position_count"],
+            snap.get("daily_pnl_pct", 0.0) * 100,
+        )
+
+        # 5. Update Order Manager Prices
+        prices = {config.pair_for(a): ingestion.get_latest_price(a)
+                  for a in ingestion.get_all_assets()
                   if ingestion.get_latest_price(a) is not None}
         order_manager.update_prices(prices)
         position_tracker.update_prices({a: ingestion.get_latest_price(a) 
@@ -172,7 +206,7 @@ async def main():
         )
         
         # Convert RiskEvents to Orders
-        from src.execution.priority_queue import PendingOrder, OrderPriority
+
         for event in risk_events:
             asset = event.asset
             pos = position_tracker.get_position(asset)
@@ -273,14 +307,20 @@ async def main():
                 continue
                 
             qty_usd = diff_w * position_tracker.nav
-            from src.execution.priority_queue import PendingOrder, OrderPriority
+    
             
+            current_w = current_weights.get(asset, 0.0)
+            if qty_usd > 0:
+                priority = OrderPriority.NEW_ENTRY if current_w < 0.001 else OrderPriority.SIZE_ADJUSTMENT
+            else:
+                priority = OrderPriority.POSITION_REDUCTION if target_w < 0.001 else OrderPriority.SIZE_ADJUSTMENT
+
             order = PendingOrder(
                 asset=asset,
                 pair=config.pair_for(asset),
                 side="BUY" if qty_usd > 0 else "SELL",
                 quantity_usd=abs(qty_usd),
-                priority=OrderPriority.NORMAL_REBALANCE,
+                priority=priority,
                 trigger="STRATEGY_REBALANCE",
                 target_weight=target_w
             )
@@ -293,12 +333,19 @@ async def main():
         """Every 1h: Performance snapshots and Parquet backup."""
         # Snapshot
         snap = position_tracker.snapshot()
-        logger.info("Hourly Performance: NAV=$%.2f, Exposure=%.2f, Positions=%d", 
+        logger.info("Hourly Performance: NAV=$%.2f, Exposure=%.2f, Positions=%d",
                      snap["nav"], snap["crypto_exposure"], snap["position_count"])
-        
+
+        # Sync balance from exchange to catch any discrepancies
+        try:
+            balances = await exec_client.get_balance()
+            position_tracker.sync_from_exchange(balances)
+        except Exception as e:
+            logger.warning("Hourly balance sync failed: %s", e)
+
         # Parquet Backup
         ingestion.save_parquet_backup()
-        
+
         # Flush decision log
         await decision_logger.flush()
 
@@ -335,6 +382,7 @@ async def main():
     await scheduler.stop_all()
     await decision_logger.flush()
     decision_logger.close()
+    await binance_client.close()
     logger.info("APEX shutdown complete.")
 
 if __name__ == "__main__":

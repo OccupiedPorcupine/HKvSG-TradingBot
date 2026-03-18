@@ -23,6 +23,7 @@ from typing import Any, Optional
 import numpy as np
 
 from src.data.api_client import RoostooClient, RoostooAPIError
+from src.data.binance_client import BinancePriceClient
 from src.data.rate_limiter import TokenBucketRateLimiter
 from src.data.validators import AssetStatus, DataValidator
 
@@ -56,16 +57,19 @@ class DataIngestionManager:
         config: dict[str, Any],
         client: RoostooClient,
         validator: Optional[DataValidator] = None,
+        binance_client: Optional[BinancePriceClient] = None,
     ) -> None:
         """Initialize the data ingestion manager.
 
         Args:
             config: Full config.yaml as dict.
-            client: Initialized RoostooClient.
+            client: Initialized RoostooClient (used for exchange info and balance).
             validator: DataValidator instance (created if not provided).
+            binance_client: If provided, use Binance for price data instead of Roostoo.
         """
         self.config = config
         self.client = client
+        self._binance_client = binance_client
 
         di_config = config.get("data_ingestion", {})
         self.validator = validator or DataValidator(
@@ -145,6 +149,11 @@ class DataIngestionManager:
             if asset not in self.price_buffers:
                 self.price_buffers[asset] = deque(maxlen=self._buffer_maxlen)
             self.validator.register_asset(asset)
+
+        # Build Binance symbol map now that the universe is known
+        if self._binance_client is not None:
+            self._binance_client.build_symbol_map(self._all_assets)
+            logger.info("Price source: Binance (batch ticker)")
 
         logger.info(
             "Universe: %d assets, tiers: %s",
@@ -233,26 +242,41 @@ class DataIngestionManager:
         now_utc = time.time()
         timestamp_utc = datetime.now(timezone.utc).isoformat()
 
-        try:
-            resp = await self.client.get_all_tickers()
-        except RoostooAPIError as e:
-            logger.error("BATCH_FETCH_FAILED: %s", e)
-            self._handle_fetch_failure(now_utc)
-            return False
+        # Fetch prices — Binance if configured, else Roostoo
+        if self._binance_client is not None:
+            raw_prices = await self._binance_client.fetch_prices()
+            if not raw_prices:
+                logger.error("BATCH_FETCH_FAILED: Binance returned no prices")
+                self._handle_fetch_failure(now_utc)
+                return False
+        else:
+            try:
+                resp = await self.client.get_all_tickers()
+            except RoostooAPIError as e:
+                logger.error("BATCH_FETCH_FAILED: %s", e)
+                self._handle_fetch_failure(now_utc)
+                return False
 
-        data = resp.get("Data", {})
-        if not data:
-            logger.error("BATCH_FETCH_EMPTY: no ticker data returned")
-            self._handle_fetch_failure(now_utc)
-            return False
+            data = resp.get("Data", {})
+            if not data:
+                logger.error("BATCH_FETCH_EMPTY: no ticker data returned")
+                self._handle_fetch_failure(now_utc)
+                return False
+
+            raw_prices = {
+                pair_name.replace(self._pair_suffix, ""): ticker.get("LastPrice", 0)
+                for pair_name, ticker in data.items()
+                if ticker.get("LastPrice", 0) > 0
+            }
 
         self._last_fetch_utc = now_utc
         self._global_stale = False
 
         # Process each asset
         received_assets: set[str] = set()
-        for pair_name, ticker in data.items():
-            asset = pair_name.replace(self._pair_suffix, "")
+        for asset, price in raw_prices.items():
+            volume = None  # Binance batch ticker doesn't include volume
+
             if asset not in self._tier_map:
                 # Unknown asset, add dynamically
                 self._tier_map[asset] = TIER_5_OBSCURE
@@ -261,9 +285,6 @@ class DataIngestionManager:
                 self.price_buffers[asset] = deque(maxlen=self._buffer_maxlen)
                 self.validator.register_asset(asset)
                 logger.info("RUNTIME_DISCOVERY asset=%s", asset)
-
-            price = ticker.get("LastPrice", 0)
-            volume = ticker.get("CoinTradeValue")
 
             if price <= 0:
                 continue

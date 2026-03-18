@@ -218,6 +218,24 @@ class OrderManager:
             )
             return None
 
+        # Pre-submission cash guard for BUY orders
+        if pending.side == "BUY":
+            available_cash = self.position_tracker.cash_balance
+            if pending.quantity_usd > available_cash:
+                logger.warning(
+                    "BUY_SKIPPED %s: need $%.0f but only $%.0f cash available",
+                    pending.asset, pending.quantity_usd, available_cash,
+                )
+                self.decision_logger.log_order(
+                    asset=pending.asset,
+                    action="SUPPRESS",
+                    trigger=pending.trigger,
+                    submitted_price=price,
+                    suppressed=True,
+                    suppression_reason=f"INSUFFICIENT_CASH_{pending.quantity_usd:.0f}>{available_cash:.0f}",
+                )
+                return None
+
         # Calculate quantity from USD amount
         quantity = abs(pending.quantity_usd) / price
 
