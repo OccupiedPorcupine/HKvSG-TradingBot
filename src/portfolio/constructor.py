@@ -530,33 +530,49 @@ class PortfolioConstructor:
         # Apply circuit breaker sizing multiplier
         final_deployment = effective_target * sizing_multiplier
 
-        # Step 3: Per-asset weights
+        # Step 3a: Pre-calculate sub-pool allocations so we don't overshoot deployment
+        meme_alloc = 0.0
+        tier5_alloc = 0.0
+        
+        if meme_selections:
+            for asset in meme_selections:
+                cap = self._get_cap(asset)
+                meme_alloc += min(0.03, cap)
+                
+        if tier5_selections:
+            for asset in tier5_selections:
+                cap = self._get_cap(asset)
+                tier5_alloc += min(0.015, cap)
+                
+        # The main pool gets whatever crypto deployment is left over
+        main_pool_deployment = max(0.0, final_deployment - meme_alloc - tier5_alloc)
+
+        # Step 3b: Per-asset weights for Main Pool
         if asset_volatilities is not None and len(asset_volatilities) > 0:
             weights = self.compute_vol_adjusted_weights(
-                selected_assets, final_deployment, asset_volatilities,
+                selected_assets, main_pool_deployment, asset_volatilities,
             )
         else:
-            weights = self.compute_equal_weights(selected_assets, final_deployment)
+            weights = self.compute_equal_weights(selected_assets, main_pool_deployment)
 
-        # Step 3c: Apply tier caps
+        # Step 3c: Apply tier caps to Main Pool
         weights = self.apply_tier_caps(weights)
 
         # Step 3d: ML multipliers (Phase 3)
         if ml_multipliers:
-            weights = self.apply_ml_multipliers(weights, ml_multipliers, final_deployment)
+            weights = self.apply_ml_multipliers(weights, ml_multipliers, main_pool_deployment)
             weights = self.apply_tier_caps(weights)  # re-check caps
 
-        # Step 3e: Add meme pool (Phase 2+)
+        # Step 3e: Merge Meme and Tier 5 pools into target weights
         if meme_selections:
             for asset in meme_selections:
                 cap = self._get_cap(asset)
                 weights[asset] = min(0.03, cap)
 
-        # Step 3f: Add Tier 5 pool (Phase 2+)
         if tier5_selections:
             for asset in tier5_selections:
                 cap = self._get_cap(asset)
-                weights[asset] = min(0.015, cap)  # midpoint of 1-2%
+                weights[asset] = min(0.015, cap)
 
         # Step 2: PAXG (from cash buffer — Phase 2+ only)
         if self._paxg_alloc:
