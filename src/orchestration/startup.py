@@ -104,12 +104,14 @@ async def run_preflight_checks(config_path: Path) -> dict[str, Any]:
             server_time = server_time_resp.get("ServerTime")
             if not server_time:
                 raise RoostooAPIError("ServerTime field missing in response")
-            
-            # Check clock sync
+
+        # Check clock sync
             local_ms = int(time.time() * 1000)
             offset_ms = abs(server_time - local_ms)
-            if offset_ms > 30000:
-                logger.warning("Large clock offset detected: %.1fs", offset_ms / 1000)
+            if offset_ms > 5000:
+                msg = f"CRITICAL: Large clock offset detected: {offset_ms / 1000:.1f}s. Exchange requires <5s."
+                logger.error(msg)
+                raise PreFlightCheckError(msg)
             else:
                 logger.info("API reachable, clock offset: %.1fms", offset_ms)
         except Exception as e:
