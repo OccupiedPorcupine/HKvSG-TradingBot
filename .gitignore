@@ -2,5 +2,5 @@
 __pychace__/
 *.pyc
 logs/
-data/
+/data/
 .pytest_cache/
