@@ -293,19 +293,23 @@ class DataIngestionManager:
 
             # Anomaly check (needs vol from feature engine — skip if no history)
             prev_price = self.get_latest_price(asset)
+            is_anomaly = False
+            
             if prev_price is not None and prev_price > 0:
                 vol_1h = self._estimate_simple_vol(asset)
                 is_anomaly = self.validator.check_anomaly(
                     asset, price, prev_price, vol_1h
                 )
-                if is_anomaly:
-                    # Store the price but flag the asset
-                    logger.debug("Anomaly flagged for %s, storing price anyway", asset)
+                
+            if is_anomaly:
+                logger.warning("Anomaly flagged for %s, DISCARDING price and filling forward", asset)
+                # Overwrite the anomalous price with the last known good price
+                price = prev_price
 
             # Mark as received
             self.validator.check_missing_bar(asset, received=True)
 
-            # Store in ring buffer
+            # Store in ring buffer (now safely using the filled-forward price if anomalous)
             record = {
                 "timestamp_utc": timestamp_utc,
                 "price": price,
