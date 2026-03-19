@@ -34,7 +34,8 @@ class MomentumSignal:
         selections = signal.generate(
             momentum_scores=feature_engine.get_momentum_scores(),
             regime=regime_state,
-            get_ema_fn=feature_engine.get_ema_values,  # Phase 2
+            get_ema_fn=feature_engine.get_ema_values,      # Phase 2
+            get_vol_fn=feature_engine.get_asset_volatility, # Phase 1 vol filter
         )
     """
 
@@ -62,6 +63,18 @@ class MomentumSignal:
             RegimeType.HIGH_VOL_CRISIS: top_n_cfg.get("crisis", 0),
         }
 
+        # Turnover Buffer (Hysteresis): exit if drops below N + buffer
+        self._hysteresis_buffer = config.get("signals", {}).get("hysteresis_buffer", 3)
+        self._prev_selections: set[str] = set()
+
+        # Volatility Exclusion Filter: exclude if > multiplier * median
+        self._vol_filter_multiplier = config.get("signals", {}).get("vol_exclusion_multiplier", 2.0)
+
+        # Sentiment Overlay (Binance Funding)
+        self._sentiment_enabled = config.get("signals", {}).get("sentiment_overlay_enabled", False)
+        self._sentiment_penalty = config.get("signals", {}).get("sentiment_crowded_penalty", -0.15)
+        self._sentiment_bonus = config.get("signals", {}).get("sentiment_reversal_bonus", 0.10)
+
         # Trend penalty magnitude (Phase 2+, 0 in Phase 1)
         self._trend_penalty = config.get("signals", {}).get(
             "trend_penalty_magnitude", -0.30
@@ -82,6 +95,10 @@ class MomentumSignal:
         get_ema_fn: Optional[
             Callable[[str], tuple[Optional[float], Optional[float]]]
         ] = None,
+        get_vol_fn: Optional[
+            Callable[[str, str], Optional[float]]
+        ] = None,
+        sentiment_scores: Optional[dict[str, float]] = None,
     ) -> dict[str, float]:
         """Generate momentum signal: rank and select top N assets.
 
@@ -91,6 +108,9 @@ class MomentumSignal:
             regime: Current RegimeState.
             get_ema_fn: Callable(asset) → (ema_60, ema_240). Used for
                         trend penalty in Phase 2. None in Phase 1.
+            get_vol_fn: Callable(asset, window) → float. Used for
+                        Phase 1 volatility exclusion filter.
+            sentiment_scores: Dict of asset → sentiment rank (0-1).
 
         Returns:
             Dict of selected asset → adjusted momentum score.
@@ -105,34 +125,115 @@ class MomentumSignal:
         }
 
         if not eligible_scores:
+            self._prev_selections = set()
             return {}
 
-        # Step 2: Apply trend penalty (Phase 2+)
+        # Step 2: Volatility Exclusion Filter (Phase 1)
+        if get_vol_fn is not None:
+            eligible_scores = self._apply_vol_filter(eligible_scores, get_vol_fn)
+
+        if not eligible_scores:
+            self._prev_selections = set()
+            return {}
+
+        # Step 3: Apply trend penalty (Phase 2+)
         if self._trend_penalty_enabled and get_ema_fn is not None:
             adjusted = self._apply_trend_penalty(eligible_scores, get_ema_fn)
         else:
             adjusted = dict(eligible_scores)
 
-        # Step 3: Determine top N from regime
+        # Step 4: Apply sentiment overlay (from Binance Funding)
+        if self._sentiment_enabled and sentiment_scores:
+            adjusted = self._apply_sentiment_overlay(adjusted, sentiment_scores)
+
+        # Step 5: Determine top N from regime
         n = self._top_n.get(regime.current_regime, 10)
 
         if n <= 0:
             # CRISIS: exit all
+            self._prev_selections = set()
             return {}
 
-        # Step 4: Rank and select top N
+        # Step 5: Rank all assets
         ranked = sorted(adjusted.items(), key=lambda x: x[1], reverse=True)
-        selections = dict(ranked[:n])
+        ranked_assets = [asset for asset, _ in ranked]
+        
+        # Step 6: Apply Hysteresis (N+3)
+        # 1. New assets must enter top N
+        # 2. Existing assets remain unless they drop below rank N + buffer
+        final_selections: dict[str, float] = {}
+        
+        # Determine exit threshold (rank is 0-indexed)
+        exit_rank_limit = n + self._hysteresis_buffer
+        
+        for rank, (asset, score) in enumerate(ranked):
+            is_prev = asset in self._prev_selections
+            
+            # Condition 1: Entry (must be in top N)
+            # Condition 2: Stay (must be in top N+buffer)
+            if rank < n or (is_prev and rank < exit_rank_limit):
+                if len(final_selections) < n or is_prev: # Keep prev even if it pushes total > n temporarily?
+                    # ARCH: "Go long the top N assets". 
+                    # Usually N is the target size. If we keep more due to hysteresis,
+                    # we might exceed target N. But we cap at N for new entries.
+                    # Actually, we should probably cap total selections at N for simplicity,
+                    # prioritizing old ones if they are still within N+buffer.
+                    
+                    # Logic: If we already have N assets, only add if it's a prev asset.
+                    if len(final_selections) < n:
+                        final_selections[asset] = score
+                    elif is_prev:
+                        final_selections[asset] = score
 
-        if selections:
+        # Update tracking for next rebalance
+        self._prev_selections = set(final_selections.keys())
+
+        if final_selections:
             logger.debug(
-                "MOMENTUM: regime=%s top_%d selected: %s",
+                "MOMENTUM: regime=%s top_%d selected (hysteresis buffer %d): %s",
                 regime.current_regime.value,
                 n,
-                list(selections.keys()),
+                self._hysteresis_buffer,
+                list(final_selections.keys()),
             )
 
-        return selections
+        return final_selections
+
+    def _apply_vol_filter(
+        self,
+        scores: dict[str, float],
+        get_vol_fn: Callable[[str, str], Optional[float]],
+    ) -> dict[str, float]:
+        """Exclude assets whose 24h vol > multiplier * median of pool."""
+        vols = {}
+        for asset in scores:
+            vol = get_vol_fn(asset, "24h")
+            if vol is not None:
+                vols[asset] = vol
+        
+        if not vols:
+            return scores
+            
+        import numpy as np
+        median_vol = np.median(list(vols.values()))
+        threshold = median_vol * self._vol_filter_multiplier
+        
+        filtered = {}
+        excluded = []
+        for asset, score in scores.items():
+            vol = vols.get(asset)
+            if vol is not None and vol > threshold:
+                excluded.append(asset)
+                continue
+            filtered[asset] = score
+            
+        if excluded:
+            logger.info(
+                "VOL_FILTER: excluded %d assets with 24h vol > %.4f (2x median %.4f): %s",
+                len(excluded), threshold, median_vol, excluded
+            )
+            
+        return filtered
 
     def _apply_trend_penalty(
         self,
@@ -190,4 +291,32 @@ class MomentumSignal:
             else:
                 adjusted[asset] = score
 
+        return adjusted
+
+    def _apply_sentiment_overlay(
+        self,
+        scores: dict[str, float],
+        sentiment_scores: dict[str, float],
+    ) -> dict[str, float]:
+        """Apply sentiment-based adjustments to momentum scores.
+        
+        Crowded Longs (high sentiment score) → Penalty.
+        Potential Reversals (low sentiment score) → Bonus.
+        """
+        adjusted = {}
+        for asset, score in scores.items():
+            sent = sentiment_scores.get(asset, 0.5) # Neutral if missing
+            
+            if sent > 0.90: # Extremely crowded
+                adj_score = score + self._sentiment_penalty
+                logger.debug("SENTIMENT_PENALTY: %s crowded (sent=%.2f) %.4f -> %.4f", 
+                             asset, sent, score, adj_score)
+                adjusted[asset] = adj_score
+            elif sent < 0.15: # Potential panic/reversal
+                adj_score = score + self._sentiment_bonus
+                logger.debug("SENTIMENT_BONUS: %s oversold (sent=%.2f) %.4f -> %.4f", 
+                             asset, sent, score, adj_score)
+                adjusted[asset] = adj_score
+            else:
+                adjusted[asset] = score
         return adjusted

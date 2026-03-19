@@ -143,6 +143,14 @@ class ExecutionClient:
             KeyError: If pair not found in cached exchange info.
         """
         if pair not in self.pair_info:
+            # SAFETY: log the suppression before raising so the event appears in
+            # the trade log even when caught by the broad except in _submit_order (E-07).
+            logger.error(
+                "SUPPRESS: pair %r not in exchange info (%d pairs loaded). "
+                "Order will be skipped.",
+                pair,
+                len(self.pair_info),
+            )
             raise KeyError(
                 f"Pair {pair!r} not in exchange info. "
                 f"Call load_exchange_info() first. "
@@ -176,25 +184,27 @@ class ExecutionClient:
         info = self.get_pair_info(pair)
         return f"{quantity:.{info.amount_precision}f}"
 
-    async def get_last_price(self, pair: str) -> float:
+    async def get_last_price(self, pair: str) -> Optional[float]:
         """Fetch the last traded price for a single pair.
 
         Args:
             pair: Trading pair string.
 
         Returns:
-            Last price as float.
+            Last price as float, or None if LastPrice is missing.
 
         Raises:
             RoostooAPIError: If the ticker request fails.
-            ValueError: If price cannot be extracted.
         """
         resp = await self.client.get_ticker(pair)
         data = resp.get("Data", {})
         pair_data = data.get(pair, {})
         price = pair_data.get("LastPrice")
         if price is None:
-            raise ValueError(f"No LastPrice in ticker for {pair}: {data}")
+            # SAFETY: propagate None to caller instead of raising; a missing price
+            # must not halt the execution loop — caller must guard against None.
+            logger.warning("No LastPrice in ticker for %s — returning None", pair)
+            return None
         return float(price)
 
     async def get_all_prices(self) -> dict[str, float]:

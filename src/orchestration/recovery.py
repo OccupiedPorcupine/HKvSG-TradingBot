@@ -38,7 +38,7 @@ def reconstruct_positions(
     
     fill_count = 0
     try:
-        with open(trade_log_path, "r") as f:
+        with open(trade_log_path, "r", errors="replace") as f:  # SAFETY: truncated UTF-8 on hard-kill raises UnicodeDecodeError before JSONDecodeError guard
             for line in f:
                 if not line.strip():
                     continue

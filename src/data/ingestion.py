@@ -12,6 +12,7 @@ Data flow:
   5. Hourly Parquet backup for crash recovery
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -99,6 +100,9 @@ class DataIngestionManager:
         self._last_fetch_utc: float = 0.0
         self._global_stale: bool = False
 
+        # Funding rates (current snapshot)
+        self.funding_rates: dict[str, float] = {}
+
         # Heartbeat / backup paths
         log_config = config.get("logging", {})
         self._heartbeat_path = Path(log_config.get("heartbeat_file", "logs/heartbeat"))
@@ -167,6 +171,57 @@ class DataIngestionManager:
         if recovered:
             logger.info("Crash recovery: loaded price history from Parquet backup")
 
+        # Phase 1: Zero-Hour Readiness — Seed from Binance if buffers are empty
+        await self.seed_history_from_binance()
+
+    async def seed_history_from_binance(self) -> None:
+        """Seed price buffers with 24h of historical data from Binance.
+        
+        Only seeds assets that have empty or partially empty buffers.
+        Prioritizes Tier 1-3 assets to ensure momentum signals work immediately.
+        """
+        if self._binance_client is None:
+            logger.warning("Binance client not configured — skipping historical seeding")
+            return
+
+        assets_to_seed = []
+        for asset in self._all_assets:
+            if len(self.price_buffers.get(asset, [])) < self._buffer_maxlen - 1:
+                assets_to_seed.append(asset)
+
+        if not assets_to_seed:
+            logger.info("All price buffers already warmed up (count=%d)", len(self._all_assets))
+            return
+
+        logger.info("SEEDING history from Binance for %d assets...", len(assets_to_seed))
+        
+        seeded_count = 0
+        failed_count = 0
+        for asset in assets_to_seed:
+            try:
+                history = await self._binance_client.fetch_klines(asset, limit=self._buffer_maxlen)
+                if history:
+                    # Clear existing (likely sparse) data and replace with full history
+                    if asset not in self.price_buffers:
+                        self.price_buffers[asset] = deque(maxlen=self._buffer_maxlen)
+                    self.price_buffers[asset].clear()
+                    for record in history:
+                        self.price_buffers[asset].append(record)
+                    seeded_count += 1
+                    if seeded_count % 10 == 0:
+                        logger.info("Seeded %d/%d assets...", seeded_count, len(assets_to_seed))
+                else:
+                    logger.warning("No Binance history found for %s", asset)
+                    failed_count += 1
+            except Exception as e:
+                logger.error("Error seeding %s: %s", asset, e)
+                failed_count += 1
+            
+            # Respect rate limits (klines is heavier than ticker)
+            await asyncio.sleep(0.05)
+
+        logger.info("HISTORICAL_SEEDING complete: %d assets warmed up, %d failed", seeded_count, failed_count)
+
     def _build_tier_map(self, exchange_pairs: dict[str, Any]) -> None:
         """Build asset-to-tier mapping from config + discovered pairs.
 
@@ -230,11 +285,11 @@ class DataIngestionManager:
     # -------------------------------------------------------------------------
 
     async def fetch_prices(self) -> bool:
-        """Fetch batch prices for all assets.
+        """Fetch batch prices and funding rates for all assets.
 
-        Makes a single API call to get all ticker prices. Validates
-        each price, fills forward missing bars, and stores in ring
-        buffers.
+        Makes API calls to get all ticker prices and funding rates. 
+        Validates each price, fills forward missing bars, and stores in 
+        ring buffers.
 
         Returns:
             True if fetch succeeded (even partially), False on total failure.
@@ -242,7 +297,11 @@ class DataIngestionManager:
         now_utc = time.time()
         timestamp_utc = datetime.now(timezone.utc).isoformat()
 
-        # Fetch prices — Binance if configured, else Roostoo
+        # 1. Fetch current funding rates (Sentiment proxy)
+        if self._binance_client is not None:
+            self.funding_rates = await self._binance_client.fetch_funding_rates()
+
+        # 2. Fetch prices — Binance if configured, else Roostoo
         if self._binance_client is not None:
             raw_prices = await self._binance_client.fetch_prices()
             if not raw_prices:
@@ -535,6 +594,14 @@ class DataIngestionManager:
         pair_name = f"{asset}{self._pair_suffix}"
         return self._pair_info.get(pair_name, {})
 
+    def get_funding_rate(self, asset: str) -> float:
+        """Get current funding rate for an asset.
+
+        Returns:
+            Funding rate (decimal), or 0.0 if not available.
+        """
+        return self.funding_rates.get(asset, 0.0)
+
     @property
     def is_data_fresh(self) -> bool:
         """Whether data is fresh enough for new trades."""
@@ -599,14 +666,17 @@ class DataIngestionManager:
             return
 
         df = pd.DataFrame(rows)
-        df.to_parquet(self._parquet_path, index=False)
-        self._last_backup_utc = now
-        logger.info(
-            "PARQUET_BACKUP saved %d records for %d assets to %s",
-            len(rows),
-            len(self.price_buffers),
-            self._parquet_path,
-        )
+        try:  # SAFETY: disk-full or permission loss must not crash the monitoring job
+            df.to_parquet(self._parquet_path, index=False)
+            self._last_backup_utc = now
+            logger.info(
+                "PARQUET_BACKUP saved %d records for %d assets to %s",
+                len(rows),
+                len(self.price_buffers),
+                self._parquet_path,
+            )
+        except Exception as e:
+            logger.error("PARQUET_BACKUP failed (non-fatal): %s", e)
 
     def _load_parquet_backup(self) -> bool:
         """Load price history from Parquet backup if recent enough.

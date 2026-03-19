@@ -4,14 +4,22 @@ Tracks whether the momentum signal is producing value by monitoring
 hit rate and winner/loser ratio. Runs every 1 hour, never blocks the
 main trading loop.
 
-Phase 0-1: Stub implementation — logs metrics but does not act on them.
-Phase 2+:  Halts momentum signal if hit rate drops below threshold.
+Design intent:
+  Phase 1 (this file): ``record_close`` feeds a 24-hour rolling deque of
+  closed-trade outcomes.  ``snapshot`` computes hit rate and win/loss ratio
+  for monitoring and display.  ``is_signal_healthy`` always returns True —
+  the trading loop continues uninterrupted regardless of metrics.
+
+  Phase 2: ``is_signal_healthy`` will apply the NP Factor halt condition
+  (hit_rate < 0.75 sustained for ``hit_rate_halt_sustained_hr`` hours).
+  The deque and snapshot interface remain unchanged; only the halt logic
+  is layered on top.
 """
 
 import logging
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -46,6 +54,21 @@ class SignalHealthConfig:
     resume_window_hr: int = 6
     winner_loser_warning: float = 0.80
     winner_loser_halt: float = 0.50
+
+
+@dataclass
+class _ClosedTradeEntry:
+    """Internal record for one fully-closed position stored in the rolling window.
+
+    Attributes:
+        is_winner: True when net P&L (commission already deducted by caller) > 0.
+        abs_pnl: Absolute dollar P&L of the trade.
+        timestamp: UTC close time; used for 24-hour window pruning.
+    """
+
+    is_winner: bool
+    abs_pnl: float
+    timestamp: datetime
 
 
 @dataclass
@@ -92,6 +115,8 @@ class SignalHealthMonitor:
         self.is_halted: bool = False
         self.halted_since: Optional[datetime] = None
         self.last_check: Optional[datetime] = None
+        # Rolling 24-hour window of closed-trade outcomes (Phase 1 monitoring).
+        self._closed_trades: deque[_ClosedTradeEntry] = deque()
 
     def record_outcome(self, outcome: RebalanceOutcome) -> None:
         """Record a rebalance outcome for hit rate tracking.
@@ -155,3 +180,84 @@ class SignalHealthMonitor:
         )
 
         return metrics
+
+    # -------------------------------------------------------------------------
+    # Phase 1 closed-trade rolling window interface
+    # -------------------------------------------------------------------------
+
+    def record_close(self, symbol: str, net_pnl: float, timestamp: datetime) -> None:
+        """Append a closed-position outcome to the 24-hour rolling window.
+
+        Commission is already deducted from ``net_pnl`` by the caller — do not
+        deduct again.  Prunes entries older than ``hit_rate_window_hr`` hours
+        on every call so the deque stays bounded without a fixed maxlen.
+
+        Args:
+            symbol: Asset symbol (stored for future per-symbol analytics).
+            net_pnl: Net realised P&L in USD after commission.
+            timestamp: UTC datetime when the position was fully closed.
+        """
+        entry = _ClosedTradeEntry(
+            is_winner=net_pnl > 0,
+            abs_pnl=abs(net_pnl),
+            timestamp=timestamp,
+        )
+        self._closed_trades.append(entry)
+
+        # Prune entries that have fallen outside the rolling window.
+        cutoff = timestamp - timedelta(hours=self.config.hit_rate_window_hr)
+        while self._closed_trades and self._closed_trades[0].timestamp < cutoff:
+            self._closed_trades.popleft()
+
+    def snapshot(self) -> dict:
+        """Return signal health metrics for the current 24-hour rolling window.
+
+        Returns:
+            Dict with keys: ``hit_rate`` (float, 0.0 when empty),
+            ``win_loss_ratio`` (float | None, None when no losers),
+            ``trades_in_window`` (int), ``window_hours`` (int, always 24).
+        """
+        trades = list(self._closed_trades)
+        total = len(trades)
+
+        if total == 0:
+            return {
+                "hit_rate": 0.0,
+                "win_loss_ratio": None,
+                "trades_in_window": 0,
+                "window_hours": 24,
+            }
+
+        winners = [t for t in trades if t.is_winner]
+        losers = [t for t in trades if not t.is_winner]
+
+        hit_rate = len(winners) / total  # total > 0 guaranteed above
+
+        if not losers:
+            win_loss_ratio: Optional[float] = None
+        else:
+            mean_loser_pnl = sum(t.abs_pnl for t in losers) / len(losers)
+            if mean_loser_pnl > 0:
+                mean_winner_pnl = (
+                    sum(t.abs_pnl for t in winners) / len(winners)
+                    if winners else 0.0
+                )
+                win_loss_ratio = mean_winner_pnl / mean_loser_pnl
+            else:
+                # All losers had exactly $0 P&L — ratio is indeterminate.
+                win_loss_ratio = None
+
+        return {
+            "hit_rate": hit_rate,
+            "win_loss_ratio": win_loss_ratio,
+            "trades_in_window": total,
+            "window_hours": 24,
+        }
+
+    def is_signal_healthy(self) -> bool:
+        """Return True when the signal is healthy enough to trade.
+
+        Phase 1: always returns True (monitoring-only, no halt logic).
+        # Phase 2: replace with NP Factor < 0.75 halt condition.
+        """
+        return True  # Phase 2: replace with NP Factor < 0.75 halt condition

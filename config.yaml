@@ -205,6 +205,17 @@ signals:
     trend_bear: 4
     crisis: 0
 
+  # turnover buffer (Hysteresis N+3)
+  hysteresis_buffer: 3
+
+  # volatility exclusion filter (Phase 1)
+  vol_exclusion_multiplier: 2.0
+
+  # sentiment overlay (Binance Funding)
+  sentiment_overlay_enabled: true
+  sentiment_crowded_penalty: -0.15
+  sentiment_reversal_bonus: 0.10
+
   # trend penalty (Phase 2+)
   trend_penalty_magnitude: -0.30       # in cross-sectional rank std deviations
 
@@ -295,7 +306,7 @@ portfolio:
   min_trade_threshold_pct_nav: 0.002     # 0.2% of NAV = $2,000 at start
 
   # rebalance cadence
-  rebalance_cadence_sec: 120            # 60 min (can tune to 1800 = 30 min)
+  rebalance_cadence_sec: 3600          # C-03: corrected from 120 (2 min) to avoid commission drag
 
 # -----------------------------------------------------------------------------
 # END-GAME DE-RISKING (Layer 5, hardcoded schedule)
@@ -454,6 +465,8 @@ logging:
   main_log: "logs/apex.log"
   trade_log: "logs/trades.jsonl"
   snapshot_log: "logs/snapshots.jsonl"
+  snapshots_log: "logs/snapshots.jsonl"          # C-02: code accesses snapshots_log (trailing s); keep both for compat
+  daily_returns_log: "logs/daily_returns.jsonl"  # C-01: required by PerformanceLogger; was missing
   heartbeat_file: "logs/heartbeat"
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 

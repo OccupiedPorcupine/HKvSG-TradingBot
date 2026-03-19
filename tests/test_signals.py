@@ -82,7 +82,7 @@ def make_config(**overrides) -> dict:
 TIER_1_3 = {
     "BTC", "ETH", "BNB", "LTC", "ADA", "DOGE", "TRX",  # T1
     "LINK", "DOT", "NEAR", "TON", "SUI", "APT", "ARB",  # T2 (partial)
-    "AAVE", "UNI", "CRV", "PENDLE",                       # T3 (partial)
+    "AAVE", "UNI", "CRV", "PENDLE", "SOL", "HBAR",       # T3 (partial)
 }
 
 TIER_4 = {"SHIB", "PEPE", "FLOKI", "WIF", "BONK", "PUMP", "PENGU"}
@@ -122,32 +122,32 @@ class TestMomentumSignal:
     def test_selects_top_n_in_bull(self):
         signal = MomentumSignal(make_config(), TIER_1_3)
         scores = make_momentum_scores(20)
-        result = signal.generate(scores, bull_regime())
+        result = signal.generate(scores, bull_regime(), get_vol_fn=None)
         assert len(result) == 10
 
     def test_selects_fewer_in_bear(self):
         signal = MomentumSignal(make_config(), TIER_1_3)
         scores = make_momentum_scores(20)
-        result = signal.generate(scores, bear_regime())
+        result = signal.generate(scores, bear_regime(), get_vol_fn=None)
         assert len(result) == 4
 
     def test_selects_fewer_in_mean_revert(self):
         signal = MomentumSignal(make_config(), TIER_1_3)
         scores = make_momentum_scores(20)
-        result = signal.generate(scores, mean_revert_regime())
+        result = signal.generate(scores, mean_revert_regime(), get_vol_fn=None)
         assert len(result) == 6
 
     def test_crisis_selects_nothing(self):
         signal = MomentumSignal(make_config(), TIER_1_3)
         scores = make_momentum_scores(20)
-        result = signal.generate(scores, crisis_regime())
+        result = signal.generate(scores, crisis_regime(), get_vol_fn=None)
         assert len(result) == 0
 
     def test_only_tier_1_3_eligible(self):
         signal = MomentumSignal(make_config(), TIER_1_3)
         # Give high scores to Tier 4/5 assets
         scores = {"SHIB": 0.99, "PEPE": 0.98, "BTC": 0.50, "ETH": 0.49}
-        result = signal.generate(scores, bull_regime())
+        result = signal.generate(scores, bull_regime(), get_vol_fn=None)
         # Only BTC and ETH should be selected (Tier 1-3)
         assert "SHIB" not in result
         assert "PEPE" not in result
@@ -163,12 +163,88 @@ class TestMomentumSignal:
         config = make_config()
         config["signals"]["top_n_selections"]["trend_bull"] = 3
         signal = MomentumSignal(config, TIER_1_3)
-        result = signal.generate(scores, bull_regime())
+        result = signal.generate(scores, bull_regime(), get_vol_fn=None)
         assert set(result.keys()) == {"BTC", "ETH", "BNB"}
+
+    def test_volatility_exclusion_filter(self):
+        config = make_config()
+        config["signals"]["vol_exclusion_multiplier"] = 2.0
+        signal = MomentumSignal(config, TIER_1_3)
+        
+        scores = {"BTC": 0.90, "ETH": 0.80, "BNB": 0.70, "SOL": 0.60}
+        # BTC and ETH normal vol (0.02), BNB high vol (0.05), SOL extreme vol (0.10)
+        # median = 0.035? no, let's pick values carefully.
+        # vols: [0.02, 0.02, 0.05, 0.10] -> median = (0.02+0.05)/2 = 0.035
+        # threshold = 0.035 * 2 = 0.07. SOL (0.10) should be excluded.
+        vols = {"BTC": 0.02, "ETH": 0.02, "BNB": 0.05, "SOL": 0.10}
+        
+        result = signal.generate(
+            scores, bull_regime(), 
+            get_vol_fn=lambda a, w: vols.get(a)
+        )
+        assert "SOL" not in result
+        assert "BTC" in result
+        assert "ETH" in result
+        assert "BNB" in result
+
+    def test_hysteresis_n_plus_3(self):
+        config = make_config()
+        config["signals"]["top_n_selections"]["trend_bull"] = 3
+        config["signals"]["hysteresis_buffer"] = 2  # N+2 for simpler test
+        signal = MomentumSignal(config, TIER_1_3)
+        
+        # Initial rebalance: Top 3
+        scores1 = {"BTC": 0.9, "ETH": 0.8, "BNB": 0.7, "SOL": 0.6, "ADA": 0.5, "DOT": 0.4}
+        result1 = signal.generate(scores1, bull_regime(), get_vol_fn=None)
+        assert set(result1.keys()) == {"BTC", "ETH", "BNB"}
+        
+        # Second rebalance: BNB drops to rank 5 (N+2)
+        # Ranked: SOL(0.85), BTC(0.8), ETH(0.75), ADA(0.7), BNB(0.65), DOT(0.4)
+        # Ranks (0-indexed): SOL:0, BTC:1, ETH:2, ADA:3, BNB:4, DOT:5
+        # N=3, buffer=2 -> exit_limit = 5. BNB at rank 4 is < 5, so it stays.
+        scores2 = {"SOL": 0.85, "BTC": 0.8, "ETH": 0.75, "ADA": 0.7, "BNB": 0.65, "DOT": 0.4}
+        result2 = signal.generate(scores2, bull_regime(), get_vol_fn=None)
+        
+        # Should have SOL (top N), BTC (top N), ETH (top N)
+        # Wait, if we prioritize entries, then SOL, BTC, ETH fill the 3 slots.
+        # But if we also keep BNB due to hysteresis...
+        # My implementation: "If we already have N assets, only add if it's a prev asset."
+        # Wait, let's re-read my logic:
+        # if rank < n or (is_prev and rank < exit_rank_limit):
+        #     if len(final_selections) < n: final_selections[asset] = score
+        #     elif is_prev: final_selections[asset] = score
+        
+        # SOL(0): rank < 3 -> add (len=1)
+        # BTC(1): rank < 3 -> add (len=2)
+        # ETH(2): rank < 3 -> add (len=3)
+        # ADA(3): rank >= 3 and not prev -> skip
+        # BNB(4): rank >= 3 but is_prev and rank < 5 -> add (len=4)
+        assert set(result2.keys()) == {"SOL", "BTC", "ETH", "BNB"}
+
+    def test_sentiment_overlay(self):
+        config = make_config()
+        config["signals"]["sentiment_overlay_enabled"] = True
+        config["signals"]["sentiment_crowded_penalty"] = -0.2
+        config["signals"]["sentiment_reversal_bonus"] = 0.1
+        signal = MomentumSignal(config, TIER_1_3)
+        
+        scores = {"BTC": 0.5, "ETH": 0.5, "BNB": 0.5}
+        # BTC crowded (sent=0.95) -> penalty
+        # ETH oversold (sent=0.05) -> bonus
+        # BNB neutral (sent=0.5) -> no change
+        sentiment = {"BTC": 0.95, "ETH": 0.05, "BNB": 0.5}
+        
+        result = signal.generate(
+            scores, bull_regime(),
+            sentiment_scores=sentiment
+        )
+        assert result["BTC"] == pytest.approx(0.5 - 0.2)
+        assert result["ETH"] == pytest.approx(0.5 + 0.1)
+        assert result["BNB"] == 0.5
 
     def test_empty_scores(self):
         signal = MomentumSignal(make_config(), TIER_1_3)
-        result = signal.generate({}, bull_regime())
+        result = signal.generate({}, bull_regime(), get_vol_fn=None)
         assert result == {}
 
     def test_fewer_assets_than_top_n(self):
@@ -211,6 +287,7 @@ class TestTrendPenalty:
         result = signal.generate(
             scores, bull_regime(),
             get_ema_fn=lambda a: emas.get(a, (None, None)),
+            get_vol_fn=None
         )
         # Penalty not enabled — scores unchanged
         assert result["BTC"] == 0.90
@@ -229,6 +306,7 @@ class TestTrendPenalty:
         result = signal.generate(
             scores, bull_regime(),
             get_ema_fn=lambda a: emas.get(a, (None, None)),
+            get_vol_fn=None
         )
         assert result["BTC"] == pytest.approx(0.90 + (-0.30))
         assert result["ETH"] == 0.85
@@ -250,6 +328,7 @@ class TestTrendPenalty:
         result = signal.generate(
             scores, bull_regime(),
             get_ema_fn=lambda a: emas.get(a, (None, None)),
+            get_vol_fn=None
         )
         # ETH(0.65) and BNB(0.60) should beat BTC(0.40)
         assert "ETH" in result
@@ -265,6 +344,7 @@ class TestTrendPenalty:
         result = signal.generate(
             scores, bull_regime(),
             get_ema_fn=lambda a: emas.get(a, (None, None)),
+            get_vol_fn=None
         )
         assert result["BTC"] == 0.90  # No penalty (EMA not available)
 

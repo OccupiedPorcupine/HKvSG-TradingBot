@@ -145,6 +145,9 @@ class FeatureEngine:
         # Momentum scores: asset → composite score
         self._momentum_scores: dict[str, float] = {}
 
+        # Sentiment scores: asset → funding-based sentiment rank
+        self._sentiment_scores: dict[str, float] = {}
+
         # ---- Regime input state ----
         self._regime_inputs: Optional[RegimeInputs] = None
 
@@ -177,8 +180,39 @@ class FeatureEngine:
         # Step 2: Cross-sectional ranking (only non-STALE assets)
         self._compute_cross_sectional(all_assets)
 
-        # Step 3: Regime input features
+        # Step 3: Sentiment scores (from funding rates)
+        self._compute_sentiment_scores(all_assets)
+
+        # Step 4: Regime input features
         self._compute_regime_inputs(all_assets)
+
+    def _compute_sentiment_scores(self, all_assets: list[str]) -> None:
+        """Compute sentiment scores based on Binance funding rates.
+        
+        High funding = bullish sentiment (potential overcrowded long).
+        Low/Negative funding = bearish sentiment (potential reversal).
+        """
+        funding_rates = {}
+        for asset in all_assets:
+            # Only consider active assets for sentiment ranking
+            if self._ingestion.get_asset_status(asset) == AssetStatus.STALE:
+                continue
+                
+            rate = self._ingestion.funding_rates.get(asset, 0.0)
+            if rate != 0.0: # Only rank if we actually have data
+                funding_rates[asset] = rate
+        
+        if not funding_rates:
+            self._sentiment_scores = {}
+            return
+
+        # Percentile rank: 1.0 = highest funding (most bullish/crowded)
+        self._sentiment_scores = self._percentile_rank(funding_rates)
+        
+        # Inject into features dict
+        for asset, score in self._sentiment_scores.items():
+            if asset in self._features:
+                self._features[asset]["sentiment_score"] = score
 
     # -------------------------------------------------------------------------
     # Per-asset features
@@ -214,10 +248,11 @@ class FeatureEngine:
 
         # -- 1-min return --
         if not is_warm:
-            ret_1m = (current_price - prev_price) / prev_price
-            if asset not in self._returns_1m:
-                self._returns_1m[asset] = deque(maxlen=1440)
-            self._returns_1m[asset].append(ret_1m)
+            if prev_price > 0:  # SAFETY: guard ZeroDivisionError if API returns 0.0 price
+                ret_1m = (current_price - prev_price) / prev_price
+                if asset not in self._returns_1m:
+                    self._returns_1m[asset] = deque(maxlen=1440)
+                self._returns_1m[asset].append(ret_1m)
 
         # -- Return features --
         for window in self._return_windows:
@@ -252,8 +287,11 @@ class FeatureEngine:
 
         for window in self._vol_windows:
             if len(returns_arr) >= window:
-                vol = float(np.std(returns_arr[-window:], ddof=1))
-                features[f"vol_{window}m"] = vol
+                sliced = returns_arr[-window:]
+                if len(sliced) >= 2:  # SAFETY: np.std(ddof=1) returns NaN on single-element slice; NaN propagates to order sizing
+                    vol = float(np.std(sliced, ddof=1))
+                    if np.isfinite(vol):
+                        features[f"vol_{window}m"] = vol
 
         # -- Rolling 24h high/low distance --
         if n >= 2:
@@ -624,6 +662,14 @@ class FeatureEngine:
             Dict mapping asset → composite momentum score in [0, 1].
         """
         return dict(self._momentum_scores)
+
+    def get_sentiment_scores(self) -> dict[str, float]:
+        """Get sentiment scores based on funding ranks.
+
+        Returns:
+            Dict mapping asset → sentiment score in [0, 1].
+        """
+        return dict(self._sentiment_scores)
 
     def get_regime_inputs(self) -> RegimeInputs:
         """Get current regime detection inputs.

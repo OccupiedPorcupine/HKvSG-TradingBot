@@ -27,6 +27,11 @@ from src.execution.priority_queue import (
     OrderPriority,
 )
 
+# TYPE_CHECKING avoids circular import; SignalHealthMonitor is only needed for type hints.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.adaptation.signal_health import SignalHealthMonitor
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +79,9 @@ class ActiveOrder:
     submitted_price: float = 0.0
     trigger_price: float = 0.0
     resubmission_count: int = 0
+    # SAFETY: store original DecisionEntry so fill details can be written back
+    # when the order is detected as filled via polling (audit S-01 / W-04 / E-06).
+    entry: Optional[DecisionEntry] = field(default=None, compare=False)
 
 
 class OrderManager:
@@ -103,6 +111,7 @@ class OrderManager:
         decision_logger: DecisionLogger,
         order_queue: OrderPriorityQueue,
         config: Optional[OrderManagerConfig] = None,
+        signal_health_monitor: Optional["SignalHealthMonitor"] = None,
     ) -> None:
         """Initialize the order manager.
 
@@ -112,13 +121,18 @@ class OrderManager:
             decision_logger: Decision logger instance.
             order_queue: Order priority queue.
             config: Order manager configuration.
+            signal_health_monitor: Optional signal health monitor for record_close on exits.
         """
         self.exec_client = exec_client
         self.position_tracker = position_tracker
         self.decision_logger = decision_logger
         self.order_queue = order_queue
         self.config = config or OrderManagerConfig()
+        self.signal_health_monitor = signal_health_monitor
         self.active_orders: dict[int, ActiveOrder] = {}
+        # Context updated each rebalance so logs carry regime/momentum (audit Section 5).
+        self._regime_state: str = "UNKNOWN"
+        self._momentum_scores: dict[str, float] = {}
         self._latest_prices: dict[str, float] = {}
 
     def update_prices(self, prices: dict[str, float]) -> None:
@@ -128,6 +142,21 @@ class OrderManager:
             prices: Dict mapping pair name to latest price.
         """
         self._latest_prices = prices
+
+    def update_context(
+        self, regime_state: str, momentum_scores: dict[str, float]
+    ) -> None:
+        """Update regime and momentum context for Screen 1 trade log compliance.
+
+        Call this at the start of each rebalance_tick so every order logged
+        in that cycle carries the correct regime_state and momentum_score.
+
+        Args:
+            regime_state: Current regime string from RegimeDetector.
+            momentum_scores: Asset → composite momentum score mapping.
+        """
+        self._regime_state = regime_state
+        self._momentum_scores = momentum_scores
 
     async def process_queue(self) -> list[OrderResult]:
         """Process all orders in the priority queue.
@@ -236,6 +265,12 @@ class OrderManager:
                 )
                 return None
 
+        # SAFETY: secondary guard in case price was cleared between the check above
+        # and this division (e.g. data race in tests or unexpected dict mutation).
+        if price <= 0:
+            logger.error("Price zero at division for %s — order skipped", pending.asset)
+            return None
+
         # Calculate quantity from USD amount
         quantity = abs(pending.quantity_usd) / price
         
@@ -251,6 +286,7 @@ class OrderManager:
             pending.side, current_weight, pending.target_weight
         )
 
+        momentum_score = self._momentum_scores.get(pending.asset, 0.0)
         entry = self.decision_logger.log_order(
             asset=pending.asset,
             action=action,
@@ -258,6 +294,21 @@ class OrderManager:
             submitted_price=price,
             current_weight_before=current_weight,
             target_weight=pending.target_weight,
+            # SAFETY: pass regime/momentum so Screen 1 log is never "UNKNOWN"/0.0
+            regime_state=self._regime_state,
+            momentum_score=momentum_score,
+            # Screen 1 compliance fields (Section 11.3)
+            signal_values={
+                "momentum_rank": momentum_score,
+                "trend_penalty_state": False,  # Phase 1: no per-asset penalty flag
+                "regime": self._regime_state,
+            },
+            target_weight_pct=round(pending.target_weight * 100, 4),
+            previous_weight_pct=round(current_weight * 100, 4),
+            size_usd=round(abs(pending.quantity_usd), 2),
+            # fill_confirmation and commission_paid_usd populated on fill
+            fill_confirmation=None,
+            commission_paid_usd=None,
         )
 
         # Submit limit order
@@ -275,12 +326,14 @@ class OrderManager:
                 self._on_fill(result, pending, entry)
                 return result
             else:
-                # Order is pending — track it
+                # Order is pending — track it. Store entry so fill details
+                # can be written back when polling detects the fill (S-01/W-04).
                 self.active_orders[result.order_id] = ActiveOrder(
                     order_id=result.order_id,
                     pending_order=pending,
                     submitted_price=price,
                     resubmission_count=pending.resubmission_count,
+                    entry=entry,  # SAFETY: preserve DecisionEntry for async fill update
                 )
                 return None
 
@@ -314,8 +367,10 @@ class OrderManager:
             query_result = await self.exec_client.query_order(order_id)
 
             if query_result is not None and query_result.is_filled:
+                # SAFETY: pass stored entry so fill_price/commission are written
+                # back to the trade log (S-01/W-04/E-06 fix).
                 self._on_fill(
-                    query_result, active.pending_order, None
+                    query_result, active.pending_order, active.entry
                 )
                 results.append(query_result)
                 to_remove.append(order_id)
@@ -427,17 +482,27 @@ class OrderManager:
             result = await self.exec_client.place_market_sell(
                 pair, quantity
             )
-            if result.is_filled:
-                self._on_fill(result, pending, None)
-            self.decision_logger.log_order(
+            em_entry = self.decision_logger.log_order(
                 asset=pending.asset,
                 action="EXIT",
                 trigger="EMERGENCY_MARKET_ORDER",
                 submitted_price=price,
                 order_type="EMERGENCY_MARKET_ORDER",
+                # SAFETY: populate Screen 1 required fields for emergency orders (S-02)
+                regime_state=self._regime_state,
+                momentum_score=self._momentum_scores.get(pending.asset, 0.0),
+                target_weight_pct=round(pending.target_weight * 100, 4),
+                previous_weight_pct=round(
+                    self.position_tracker.get_weight(pending.asset) * 100, 4
+                ),
+                size_usd=round(abs(pending.quantity_usd), 2),
             )
+            if result.is_filled:
+                self._on_fill(result, pending, em_entry)
             return result
         except Exception as e:
+            # SAFETY: wrap entire emergency-exit block so a pair_info failure
+            # never leaves a position stranded without a log entry (E-11).
             logger.critical(
                 "EMERGENCY_MARKET_ORDER FAILED for %s: %s",
                 pending.asset,
@@ -460,6 +525,17 @@ class OrderManager:
         """
         asset = pending.asset
         commission = result.commission_pct
+        # SAFETY: mock exchange occasionally returns 0.0 commission; apply the
+        # contractual floor (0.05% maker / 0.1% taker) for Screen 1 compliance.
+        if commission == 0.0:
+            commission = 0.0005 if result.role.upper() == "MAKER" else 0.001
+
+        # Capture cost basis before sell (needed for record_close net_pnl).
+        cost_basis_before: float = 0.0
+        if pending.side == "SELL":
+            pos = self.position_tracker.get_position(asset)
+            if pos is not None:
+                cost_basis_before = pos.cost_basis
 
         if pending.side == "BUY":
             self.position_tracker.on_buy_fill(
@@ -470,15 +546,35 @@ class OrderManager:
                 asset, result.filled_quantity, result.filled_price, commission
             )
 
+        commission_usd = result.filled_quantity * result.filled_price * commission
+
         # Update decision log entry with fill info
         if entry is not None:
             entry.fill_price = result.filled_price
             entry.filled_quantity = result.filled_quantity
             entry.fill_timestamp_utc = datetime.now(timezone.utc).isoformat()
-            entry.commission_paid = (
-                result.filled_quantity
-                * result.filled_price
-                * commission
+            entry.commission_paid = commission_usd
+            # Screen 1 compliance: fill_confirmation and commission_paid_usd
+            entry.fill_confirmation = {
+                "filled": True,
+                "fill_price": result.filled_price,
+                "filled_quantity": result.filled_quantity,
+                "fill_timestamp_utc": entry.fill_timestamp_utc,
+            }
+            entry.commission_paid_usd = commission_usd
+
+        # Signal health: record_close on full position exit
+        if (
+            pending.side == "SELL"
+            and self.signal_health_monitor is not None
+            and self.position_tracker.get_position(asset) is None
+        ):
+            realized_pnl = (result.filled_price - cost_basis_before) * result.filled_quantity
+            net_pnl = realized_pnl - commission_usd
+            self.signal_health_monitor.record_close(
+                symbol=asset,
+                net_pnl=net_pnl,
+                timestamp=datetime.now(timezone.utc),
             )
 
     def _check_adverse_move(

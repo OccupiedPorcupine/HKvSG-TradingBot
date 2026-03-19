@@ -4,3 +4,4 @@ __pychace__/
 logs/
 /data/
 .pytest_cache/
+.obsidian

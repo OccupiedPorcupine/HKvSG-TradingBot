@@ -74,7 +74,7 @@ class Scheduler:
                             
                             # Update heartbeat if this is the ingestion job
                             if name == "data_ingestion":
-                                self._update_heartbeat()
+                                await self._update_heartbeat()  # SAFETY: method is async; missing await meant heartbeat was never written
                                 
                         except asyncio.CancelledError:
                             raise

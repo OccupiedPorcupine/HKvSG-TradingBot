@@ -61,6 +61,15 @@ class DecisionEntry:
     commission_paid: Optional[float] = None
     suppressed: bool = False
     suppression_reason: Optional[str] = None
+    # Screen 1 compliance fields (Section 11.3)
+    symbol: Optional[str] = None
+    signal_values: Optional[dict] = None
+    target_weight_pct: Optional[float] = None
+    previous_weight_pct: Optional[float] = None
+    limit_price: Optional[float] = None
+    size_usd: Optional[float] = None
+    fill_confirmation: Optional[dict] = None
+    commission_paid_usd: Optional[float] = None
 
 
 class DecisionLogger:
@@ -141,6 +150,11 @@ class DecisionLogger:
             submitted_price=submitted_price,
             **kwargs,
         )
+        # Auto-populate Screen 1 compliance fields from existing data.
+        if entry.symbol is None:
+            entry.symbol = entry.asset
+        if entry.limit_price is None and entry.submitted_price > 0:
+            entry.limit_price = entry.submitted_price
         self.log(entry)
         return entry
 

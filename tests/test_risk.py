@@ -274,24 +274,22 @@ class TestTrailingStopManager:
         assert events[0].asset == "SHIB"
 
     def test_dynamic_tightening_high(self) -> None:
-        """Daily P&L > +2% tightens stops by 40%."""
+        """Per-position unrealized P&L > +2% tightens stops by 40%."""
         mgr = self._make_manager(tightening=True)
 
-        effective = mgr.compute_effective_stop(
-            base_stop_pct=0.06,
-            daily_pnl_pct=0.025,
-        )
+        # Entry at 100.0, current at 102.5 → unrealized P&L = +2.5%
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=102.5, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=102.5)
         # 6% × (1 - 0.40) = 3.6%
         assert abs(effective - 0.036) < 1e-6
 
     def test_dynamic_tightening_medium(self) -> None:
-        """Daily P&L +1% to +2% tightens stops by 20%."""
+        """Per-position unrealized P&L +1% to +2% tightens stops by 20%."""
         mgr = self._make_manager(tightening=True)
 
-        effective = mgr.compute_effective_stop(
-            base_stop_pct=0.06,
-            daily_pnl_pct=0.015,
-        )
+        # Entry at 100.0, current at 101.5 → unrealized P&L = +1.5%
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=101.5, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=101.5)
         # 6% × (1 - 0.20) = 4.8%
         assert abs(effective - 0.048) < 1e-6
 
@@ -299,11 +297,10 @@ class TestTrailingStopManager:
         """Even with 40% tightening, stops never go below 2%."""
         mgr = self._make_manager(tightening=True)
 
-        # With a 3% base stop and 40% tightening: 3% × 0.6 = 1.8% < floor
-        effective = mgr.compute_effective_stop(
-            base_stop_pct=0.03,
-            daily_pnl_pct=0.025,
-        )
+        # Entry at 100.0, current at 102.5 → +2.5% P&L → 40% tightening
+        # With a 3% base stop: 3% × 0.6 = 1.8% < floor
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=102.5, base_stop_pct=0.03)
+        effective = mgr.compute_effective_stop(pos, current_price=102.5)
         assert effective == 0.02  # floor
 
     def test_endgame_stop_override(self) -> None:
@@ -311,10 +308,8 @@ class TestTrailingStopManager:
         mgr = self._make_manager()
 
         # Base 6%, endgame 3%
-        effective = mgr.compute_effective_stop(
-            base_stop_pct=0.06,
-            endgame_stop_override=0.03,
-        )
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=100.0, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=100.0, endgame_stop_override=0.03)
         assert abs(effective - 0.03) < 1e-6
 
     def test_endgame_plus_tightening(self) -> None:
@@ -322,20 +317,14 @@ class TestTrailingStopManager:
         mgr = self._make_manager(tightening=True)
 
         # Base 6%, tightened by 40% = 3.6%, endgame = 3%
-        # Take min(3.6%, 3%) = 3%
-        effective = mgr.compute_effective_stop(
-            base_stop_pct=0.06,
-            daily_pnl_pct=0.025,
-            endgame_stop_override=0.03,
-        )
+        # Entry at 100.0, current at 102.5 → +2.5% P&L → 40% tightening
+        # Tightened = 6% × 0.6 = 3.6%, endgame = 3%. Take min(3.6%, 3%) = 3%
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=102.5, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=102.5, endgame_stop_override=0.03)
         assert abs(effective - 0.03) < 1e-6
 
         # Endgame = 5% is less tight than tightened 3.6%
-        effective2 = mgr.compute_effective_stop(
-            base_stop_pct=0.06,
-            daily_pnl_pct=0.025,
-            endgame_stop_override=0.05,
-        )
+        effective2 = mgr.compute_effective_stop(pos, current_price=102.5, endgame_stop_override=0.05)
         # tightened = 3.6%, endgame = 5%, min(3.6%, 5%) = 3.6%
         assert abs(effective2 - 0.036) < 1e-6
 

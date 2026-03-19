@@ -1,21 +1,15 @@
-"""Binance public API client for real-time price data.
-
-Fetches all prices in a single batch call to /api/v3/ticker/price.
-One HTTP request → every tradeable symbol's current price.
-No API key required.
-
-Weight cost: 2 per call (vs 1 per individual symbol).
-Safe polling rate: up to 10 calls/second; 1-2s interval recommended.
-"""
-
+import asyncio
 import logging
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, Any
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
 BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/price"
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_FUTURES_PREMIUM_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
 
 # Assets whose Binance symbol differs from the default {ASSET}USDT pattern,
 # or that don't exist on Binance (None = skip).
@@ -44,11 +38,10 @@ def asset_to_binance_symbol(asset: str) -> Optional[str]:
 
 
 class BinancePriceClient:
-    """Fetches live prices from Binance using a single batch call.
+    """Fetches live prices, historical klines, and funding rates from Binance.
 
-    One call to /api/v3/ticker/price returns every symbol simultaneously.
-    Call build_symbol_map() after the asset universe is known so incoming
-    Binance symbols can be mapped back to APEX asset names.
+    Uses public endpoints (no API key required). Handles symbol mapping
+    between APEX and Binance.
 
     Attributes:
         _symbol_to_asset: Reverse map from Binance symbol to APEX asset name.
@@ -132,6 +125,119 @@ class BinancePriceClient:
             len(self._symbol_to_asset),
         )
         return prices
+
+    async def fetch_klines(
+        self, asset: str, interval: str = "1m", limit: int = 1440
+    ) -> list[dict[str, Any]]:
+        """Fetch historical klines (OHLCV) for a single asset.
+
+        Binance limit is 1000 per call. If limit > 1000, multiple calls
+        are made and joined.
+
+        Returns:
+            List of dicts: {timestamp_utc, price, volume}
+        """
+        symbol = asset_to_binance_symbol(asset)
+        if not symbol:
+            return []
+
+        session = await self._get_session()
+        all_klines = []
+        remaining = limit
+        end_time = None
+
+        try:
+            while remaining > 0:
+                fetch_limit = min(remaining, 1000)
+                params: dict[str, Any] = {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "limit": fetch_limit,
+                }
+                if end_time:
+                    params["endTime"] = end_time
+
+                async with session.get(BINANCE_KLINES_URL, params=params) as resp:
+                    if resp.status != 200:
+                        logger.error("Binance klines HTTP %d for %s", resp.status, asset)
+                        break
+                    
+                    data = await resp.json()
+                    if not data:
+                        break
+                    
+                    # Convert to APEX format
+                    # data[i] = [open_time, open, high, low, close, volume, ...]
+                    current_batch = []
+                    for k in data:
+                        current_batch.append({
+                            "timestamp_utc": datetime.fromtimestamp(
+                                k[0] / 1000, tz=timezone.utc
+                            ).isoformat(),
+                            "price": float(k[4]),  # Close price
+                            "volume": float(k[5]), # Volume
+                        })
+                    
+                    # Prepend since we are moving backward in time if end_time is used
+                    # But if we don't use startTime, we get the MOST RECENT ones ending at now.
+                    # Actually, if no endTime is specified, it returns the LATEST entries.
+                    # If we need more, we take the oldest from the current batch and set it as endTime.
+                    
+                    if not all_klines:
+                        all_klines = current_batch
+                    else:
+                        # Join: current_batch contains older data than all_klines
+                        all_klines = current_batch + all_klines
+                    
+                    remaining -= len(data)
+                    if len(data) < fetch_limit:
+                        break # No more data available
+                    
+                    # Set end_time to just before the oldest one in this batch
+                    end_time = data[0][0] - 1
+                    
+                    # Small sleep to respect rate limits if doing many calls
+                    if remaining > 0:
+                        await asyncio.sleep(0.1)
+
+            return all_klines[-limit:] # Ensure exact limit
+
+        except Exception as e:
+            logger.error("Binance fetch_klines failed for %s: %s", asset, e)
+            return all_klines
+
+    async def fetch_funding_rates(self) -> dict[str, float]:
+        """Fetch current funding rates for all assets from Binance Futures.
+
+        Returns:
+            Dict mapping APEX asset name to current funding rate.
+        """
+        session = await self._get_session()
+        try:
+            async with session.get(BINANCE_FUTURES_PREMIUM_URL) as resp:
+                if resp.status != 200:
+                    logger.error("Binance futures premium returned HTTP %d", resp.status)
+                    return {}
+                data = await resp.json()
+        except Exception as e:
+            logger.error("Binance fetch_funding_rates failed: %s", e)
+            return {}
+
+        # If data is a list (all symbols)
+        if isinstance(data, list):
+            rates: dict[str, float] = {}
+            for item in data:
+                symbol = item.get("symbol", "")
+                asset = self._symbol_to_asset.get(symbol)
+                if asset is None:
+                    continue
+                try:
+                    rates[asset] = float(item["lastFundingRate"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+            return rates
+        
+        return {}
 
     async def close(self) -> None:
         """Close the aiohttp session."""

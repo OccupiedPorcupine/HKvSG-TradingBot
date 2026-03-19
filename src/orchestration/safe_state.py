@@ -109,10 +109,6 @@ class SystemState:
         if not self.is_global_safe_mode:
             self.is_global_safe_mode = True
             logger.critical("SYSTEM_CRITICAL: Entering global SAFE MODE. Reason: %s", reason)
-            if all_critical_ok:
-            # We don't automatically exit safe mode here per spec,
-            # but we could. For now, we stay in safe mode but log.
-            logger.info("All critical jobs are healthy, but remaining in SAFE MODE for safety.")
 
     def _check_global_recovery(self) -> None:
         """Evaluate if the system can exit global safe mode automatically.

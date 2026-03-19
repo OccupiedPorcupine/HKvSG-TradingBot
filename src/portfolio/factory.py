@@ -100,7 +100,12 @@ def create_portfolio_constructor(
     end_str = config.get("competition.competition_end_utc")
     comp_end: Optional[datetime] = None
     if end_str:
-        comp_end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        _parsed = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        # SAFETY: if config string has no timezone suffix, fromisoformat returns a
+        # naive datetime; comparing naive vs aware raises TypeError at endgame check.
+        if _parsed.tzinfo is None:
+            _parsed = _parsed.replace(tzinfo=timezone.utc)
+        comp_end = _parsed
 
     # Phase 1: simple T-1h sell-all, no full endgame schedule
     endgame_schedule = None
