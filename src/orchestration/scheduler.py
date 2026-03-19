@@ -91,15 +91,18 @@ class Scheduler:
         self._tasks.append(task)
         logger.info("Scheduled job '%s' every %gs", name, interval_sec)
 
-    def _update_heartbeat(self) -> None:
-        """Write current timestamp to the heartbeat file."""
-        try:
+    async def _update_heartbeat(self) -> None: # Make it async
+        """Write current timestamp to the heartbeat file without blocking the event loop."""
+        def write_sync():
             self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.heartbeat_path, "w") as f:
                 f.write(datetime.now(timezone.utc).isoformat())
+                
+        try:
+            await asyncio.to_thread(write_sync)
         except Exception as e:
             logger.error("Failed to write heartbeat: %s", e)
-
+    
     async def stop_all(self) -> None:
         """Cancel all scheduled tasks."""
         logger.info("Stopping all scheduled tasks...")

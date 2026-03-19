@@ -143,36 +143,48 @@ class MomentumSignal:
     ) -> dict[str, float]:
         """Apply trend penalty to assets where EMA(60) < EMA(240).
 
-        The penalty is additive (in cross-sectional rank standard deviations).
-        Strong momentum assets survive the penalty. Weak momentum + negative
-        trend assets naturally fall below the top-N threshold.
-
-        Args:
-            scores: Asset → raw momentum score.
-            get_ema_fn: Callable(asset) → (ema_60, ema_240).
-
-        Returns:
-            Asset → adjusted score (with penalty applied where applicable).
+        Scales penalty to -0.15 if >70% of the universe is in a downtrend
+        to preserve ranking discrimination during broad market sell-offs.
         """
         adjusted: dict[str, float] = {}
-
-        for asset, score in scores.items():
+        
+        # Step 1: Pre-calculate EMA states to determine broad market trend
+        ema_states = {}
+        downtrend_count = 0
+        
+        for asset in scores.keys():
             ema_60, ema_240 = get_ema_fn(asset)
+            ema_states[asset] = (ema_60, ema_240)
+            if ema_60 is not None and ema_240 is not None and ema_60 < ema_240:
+                downtrend_count += 1
+                
+        # Step 2: Scale penalty if >70% of eligible universe is in downtrend
+        total_assets = len(scores)
+        current_penalty = self._trend_penalty
+        
+        if total_assets > 0 and (downtrend_count / total_assets) > 0.70:
+            current_penalty = -0.15  # Scaled penalty for broad downturns
+            logger.debug(
+                "TREND_PENALTY SCALED: %d/%d assets (%.1f%%) in downtrend. "
+                "Penalty reduced to %.2f",
+                downtrend_count, total_assets, 
+                (downtrend_count / total_assets) * 100, current_penalty
+            )
+
+        # Step 3: Apply the calculated penalty
+        for asset, score in scores.items():
+            ema_60, ema_240 = ema_states[asset]
 
             if (
                 ema_60 is not None
                 and ema_240 is not None
                 and ema_60 < ema_240
             ):
-                adjusted_score = score + self._trend_penalty
+                adjusted_score = score + current_penalty
                 logger.debug(
                     "TREND_PENALTY: %s score %.4f → %.4f "
                     "(EMA60=%.2f < EMA240=%.2f)",
-                    asset,
-                    score,
-                    adjusted_score,
-                    ema_60,
-                    ema_240,
+                    asset, score, adjusted_score, ema_60, ema_240,
                 )
                 adjusted[asset] = adjusted_score
             else:

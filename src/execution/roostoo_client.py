@@ -421,6 +421,13 @@ class ExecutionClient:
         filled_price = float(detail.get("FilledAverPrice", 0))
         filled_qty = float(detail.get("FilledQuantity", 0))
         commission = float(detail.get("CommissionPercent", 0))
+        
+        # Override missing/zero mock exchange commission data based on order type
+        if commission == 0.0:
+            if status.upper() == "FILLED":
+                # Fallback to architecture-defined limits
+                # Note: 'role' checking could be used here if the API provides accurate maker/taker flags
+                commission = 0.001 if side == "MARKET" else 0.0005 # 0.1% taker, 0.05% maker
         role = str(detail.get("Role", ""))
 
         is_filled = status.upper() == "FILLED"

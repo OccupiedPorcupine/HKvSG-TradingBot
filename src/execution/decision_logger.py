@@ -151,7 +151,9 @@ class DecisionLogger:
         """
         elapsed = time.monotonic() - self._last_flush
         if elapsed >= self.flush_interval_sec and self.buffer:
-            self._sync_flush()
+            # MUST dispatch to async task to prevent blocking the event loop
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.flush())
 
     def _sync_flush(self) -> None:
         """Synchronously flush buffer to disk."""

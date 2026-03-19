@@ -152,7 +152,8 @@ class DataValidator:
         """
         self.register_asset(asset)
 
-        # If previously flagged, this bar confirms the move — clear the flag
+        # If previously flagged, this bar confirms the PREVIOUS move — clear the flag.
+        # But we MUST still check if the CURRENT bar is ALSO an anomaly.
         if self._anomaly_flags.get(asset, False):
             self._anomaly_flags[asset] = False
             if self._statuses[asset] == AssetStatus.ANOMALY:
@@ -162,6 +163,10 @@ class DataValidator:
                     asset,
                     new_price,
                 )
+            # DO NOT RETURN FALSE HERE. Proceed to check the new bar.
+
+        # Skip anomaly check if no volatility data yet
+        if vol_1h is None or vol_1h <= 0 or prev_price <= 0:
             return False
 
         # Skip anomaly check if no volatility data yet

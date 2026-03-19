@@ -126,10 +126,16 @@ class PreTradeValidator:
                 if asset not in capped_assets and weights[asset] > 0:
                     uncapped_assets.append(asset)
 
-            if uncapped_assets:
-                per_asset_add = excess / len(uncapped_assets)
-                for asset in uncapped_assets:
-                    weights[asset] += per_asset_add
+            if not uncapped_assets:
+                # All selected assets are capped. Excess cannot be redistributed.
+                # The excess naturally becomes cash/PAXG buffer.
+                break 
+
+            per_asset_add = excess / len(uncapped_assets)
+            for asset in uncapped_assets:
+                weights[asset] += per_asset_add
+
+        
 
         # --- Check 2: Total crypto exposure ---
         total_crypto = sum(w for w in weights.values() if w > 0)

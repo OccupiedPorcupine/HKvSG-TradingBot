@@ -100,30 +100,27 @@ class MLOverlay:
         """
         self._predictions = predictions
 
-    def check_ic(self, rolling_48h_ic: float) -> None:
+    def check_ic(self, rolling_12h_ic: float) -> None:
         """Check IC and halt/resume ML overlay (Phase 3).
 
         Args:
-            rolling_48h_ic: Rolling 48-hour information coefficient.
+            rolling_12h_ic: Rolling 12-hour information coefficient.
         """
         if not self._enabled:
             return
 
-        if not self._halted and rolling_48h_ic < self._ic_halt_threshold:
+        if not self._halted and rolling_12h_ic < self._ic_halt_threshold:
             self._halted = True
             logger.warning(
                 "ML_OVERLAY halted: IC=%.4f < %.4f threshold",
-                rolling_48h_ic,
+                rolling_12h_ic,
                 self._ic_halt_threshold,
             )
-        elif self._halted and rolling_48h_ic > self._ic_resume_threshold:
-            # Full resume logic (12h sustained) handled by ml_monitor.py
-            # This is a simplified check; the monitor layer handles the
-            # sustained window requirement
+        elif self._halted and rolling_12h_ic > self._ic_resume_threshold:
             self._halted = False
             logger.info(
                 "ML_OVERLAY resumed: IC=%.4f > %.4f threshold",
-                rolling_48h_ic,
+                rolling_12h_ic,
                 self._ic_resume_threshold,
             )
 
