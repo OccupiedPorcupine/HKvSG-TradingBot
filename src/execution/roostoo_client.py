@@ -390,7 +390,7 @@ class ExecutionClient:
             Dict mapping currency to {"free": float, "locked": float}.
         """
         resp = await self.client.get_balance()
-        wallet = resp.get("Wallet", {})
+        wallet = resp.get("SpotWallet", {})
         balances: dict[str, dict[str, float]] = {}
         for currency, info in wallet.items():
             if isinstance(info, dict):
