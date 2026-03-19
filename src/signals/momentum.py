@@ -154,8 +154,9 @@ class MomentumSignal:
             self._prev_selections = set()
             return {}
 
-        # Step 5: Rank all assets
-        ranked = sorted(adjusted.items(), key=lambda x: x[1], reverse=True)
+        # Step 5: Filter out negative momentum, then Rank
+        positive_adjusted = {asset: score for asset, score in adjusted.items() if score > 0}
+        ranked = sorted(positive_adjusted.items(), key=lambda x: x[1], reverse=True)
         ranked_assets = [asset for asset, _ in ranked]
         
         # Step 6: Apply Hysteresis (N+3)
