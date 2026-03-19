@@ -815,6 +815,195 @@ class TestConfigIntegration:
 
 
 # =========================================================================
+# PAXGAllocator tests
+# =========================================================================
+
+
+class TestPAXGAllocator:
+    """Tests for PAXGAllocator — regime-based PAXG weight from cash buffer."""
+
+    _CONFIG = {
+        "paxg": {
+            "allocation": {
+                "TREND_BULL": 0.04,
+                "MEAN_REVERT": 0.075,
+                "TREND_BEAR": 0.125,
+                "HIGH_VOL_CRISIS": 0.125,
+            },
+            "rebalance_tolerance": 0.01,
+        }
+    }
+
+    def _make(self):
+        from src.portfolio.paxg_allocator import PAXGAllocator
+        from src.regime.regime_state import RegimeType
+        return PAXGAllocator(self._CONFIG), RegimeType
+
+    def test_trend_bull_target(self) -> None:
+        alloc, RT = self._make()
+        assert alloc.get_target_weight(RT.TREND_BULL) == 0.04
+
+    def test_high_vol_crisis_target(self) -> None:
+        alloc, RT = self._make()
+        assert alloc.get_target_weight(RT.HIGH_VOL_CRISIS) == 0.125
+
+    def test_no_order_within_tolerance(self) -> None:
+        alloc, RT = self._make()
+        # target=0.04, current=0.035 → delta=0.005 < 0.01
+        order = alloc.compute_order(0.035, RT.TREND_BULL, 1_000_000)
+        assert order is None
+
+    def test_buy_order_when_under_target(self) -> None:
+        alloc, RT = self._make()
+        # target=0.04, current=0.02 → delta=0.02 > tolerance
+        order = alloc.compute_order(0.02, RT.TREND_BULL, 1_000_000)
+        assert order is not None
+        assert order["side"] == "buy"
+        assert order["symbol"] == "PAXG"
+        assert abs(order["amount_usd"] - 20_000) < 1.0
+
+    def test_sell_order_when_over_target(self) -> None:
+        alloc, RT = self._make()
+        # target=0.04, current=0.08 → delta=-0.04 > tolerance
+        order = alloc.compute_order(0.08, RT.TREND_BULL, 1_000_000)
+        assert order is not None
+        assert order["side"] == "sell"
+        assert abs(order["amount_usd"] - 40_000) < 1.0
+
+    def test_unknown_regime_fallback(self) -> None:
+        """Regime not in config falls back to 0.05 defensive default."""
+        from src.portfolio.paxg_allocator import PAXGAllocator
+        from src.regime.regime_state import RegimeType
+        alloc = PAXGAllocator({"paxg": {"allocation": {}, "rebalance_tolerance": 0.01}})
+        assert alloc.get_target_weight(RegimeType.MEAN_REVERT) == 0.05
+
+
+# =========================================================================
+# EndgameManager tests
+# =========================================================================
+
+
+from src.portfolio.endgame import EndgameManager
+
+
+_ENDGAME_SCHEDULE = [
+    {"hours_remaining": 48,   "max_exposure": 1.00, "stop_override": None},
+    {"hours_remaining": 24,   "max_exposure": 0.70, "stop_override": None},
+    {"hours_remaining": 12,   "max_exposure": 0.45, "stop_override": None},
+    {"hours_remaining": 4,    "max_exposure": 0.25, "stop_override": 0.03},
+    {"hours_remaining": 1,    "max_exposure": 0.15, "stop_override": 0.02},
+    {"hours_remaining": 0.25, "max_exposure": 0.00, "stop_override": None},
+]
+
+_ROUND_END_UTC = "2026-03-31T23:59:00Z"
+
+
+def _make_endgame_manager(round_end_utc: str = _ROUND_END_UTC) -> EndgameManager:
+    return EndgameManager({
+        "endgame": {
+            "schedule": _ENDGAME_SCHEDULE,
+            "round_end_utc": round_end_utc,
+        }
+    })
+
+
+def _now_plus(hours: float) -> datetime:
+    """Return a fixed 'now' such that hours_remaining == hours."""
+    round_end = datetime.fromisoformat(_ROUND_END_UTC.replace("Z", "+00:00"))
+    return round_end - timedelta(hours=hours)
+
+
+class TestEndgameManager:
+    """Tests for EndgameManager — standalone de-risking logic."""
+
+    def test_over_48h_no_restriction(self) -> None:
+        """More than 48 h remaining → max_exposure=1.0, no stop, no sell."""
+        mgr = _make_endgame_manager()
+        c = mgr.get_constraints(now=_now_plus(60))
+        assert c["max_exposure"] == 1.0
+        assert c["stop_override"] is None
+        assert c["sell_all"] is False
+        assert c["hours_remaining"] > 48
+
+    def test_24_to_48h_exposure_cap(self) -> None:
+        """Between 24 and 48 h remaining → cap at 0.70."""
+        mgr = _make_endgame_manager()
+        c = mgr.get_constraints(now=_now_plus(30))
+        assert abs(c["max_exposure"] - 0.70) < 1e-9
+        assert c["stop_override"] is None
+        assert c["sell_all"] is False
+
+    def test_4_to_12h_exposure_and_stop(self) -> None:
+        """Between 4 and 12 h remaining → cap at 0.25, stop_override=0.03."""
+        mgr = _make_endgame_manager()
+        c = mgr.get_constraints(now=_now_plus(8))
+        assert abs(c["max_exposure"] - 0.25) < 1e-9
+        assert abs(c["stop_override"] - 0.03) < 1e-9
+        assert c["sell_all"] is False
+
+    def test_under_15_min_sell_all(self) -> None:
+        """Less than 15 minutes (0.25 h) remaining → sell_all=True."""
+        mgr = _make_endgame_manager()
+        c = mgr.get_constraints(now=_now_plus(0.1))  # 6 minutes
+        assert c["sell_all"] is True
+        assert c["max_exposure"] == 0.0
+
+    def test_past_round_end_sell_all(self) -> None:
+        """Current time past round_end → sell_all=True."""
+        mgr = _make_endgame_manager()
+        c = mgr.get_constraints(now=_now_plus(-1))  # 1 hour after end
+        assert c["sell_all"] is True
+        assert c["max_exposure"] == 0.0
+
+    def test_reset_for_round_updates_end_time(self) -> None:
+        """reset_for_round changes round_end and is reflected in constraints."""
+        mgr = _make_endgame_manager()
+        new_end = "2027-06-30T23:59:00Z"
+        mgr.reset_for_round(new_end)
+        expected = datetime.fromisoformat(new_end.replace("Z", "+00:00"))
+        assert mgr.round_end == expected
+        # 60 h before new end → no restriction
+        now = expected - timedelta(hours=60)
+        c = mgr.get_constraints(now=now)
+        assert c["max_exposure"] == 1.0
+
+    def test_all_comparisons_in_utc(self) -> None:
+        """get_constraints(now) with tz-aware UTC datetime works correctly."""
+        mgr = _make_endgame_manager()
+        utc_now = _now_plus(30)
+        assert utc_now.tzinfo is not None
+        c = mgr.get_constraints(now=utc_now)
+        assert abs(c["max_exposure"] - 0.70) < 1e-9
+
+    def test_no_round_end_utc_unconstrained(self) -> None:
+        """Missing round_end_utc → always returns unconstrained defaults."""
+        mgr = EndgameManager({"endgame": {"schedule": _ENDGAME_SCHEDULE}})
+        c = mgr.get_constraints()
+        assert c["max_exposure"] == 1.0
+        assert c["sell_all"] is False
+        assert c["hours_remaining"] == float("inf")
+
+    def test_tier_change_logged(self, caplog) -> None:
+        """Tier transitions emit the expected log message."""
+        import logging
+        mgr = _make_endgame_manager()
+        with caplog.at_level(logging.INFO, logger="src.portfolio.endgame"):
+            mgr.get_constraints(now=_now_plus(60))  # tier 0
+            mgr.get_constraints(now=_now_plus(30))  # tier 1 — should log change
+        assert "ENDGAME TIER_CHANGE" in caplog.text
+
+    def test_same_tier_not_logged_twice(self, caplog) -> None:
+        """Repeated calls in the same tier don't re-log the transition."""
+        import logging
+        mgr = _make_endgame_manager()
+        with caplog.at_level(logging.INFO, logger="src.portfolio.endgame"):
+            mgr.get_constraints(now=_now_plus(30))  # enters tier 1
+            caplog.clear()
+            mgr.get_constraints(now=_now_plus(28))  # still tier 1
+        assert "ENDGAME TIER_CHANGE" not in caplog.text
+
+
+# =========================================================================
 # Run with pytest
 # =========================================================================
 

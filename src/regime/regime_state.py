@@ -77,8 +77,8 @@ class RegimeState:
         btc_vol_percentile: Latest BTC 1h vol percentile (0-100).
     """
 
-    current_regime: RegimeType = RegimeType.TREND_BULL
-    previous_regime: RegimeType = RegimeType.TREND_BULL
+    current_regime: RegimeType = RegimeType.MEAN_REVERT
+    previous_regime: RegimeType = RegimeType.MEAN_REVERT
     bars_in_current_regime: int = 0
     transition_pending: bool = False
     transition_target: Optional[RegimeType] = None

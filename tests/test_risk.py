@@ -212,10 +212,10 @@ class TestTrailingStopManager:
         tightening_config = None
         if tightening:
             tightening_config = {
-                "threshold_high_pnl": 0.02,
-                "tightening_high": 0.40,
-                "threshold_medium_pnl": 0.01,
-                "tightening_medium": 0.20,
+                "tighten_high_threshold": 0.05,
+                "tighten_high_factor": 0.60,
+                "tighten_mid_threshold": 0.025,
+                "tighten_mid_factor": 0.80,
             }
         return TrailingStopManager(
             base_stops={"tier_1_3": 0.06, "tier_4_5": 0.08, "trump": 0.10},
@@ -274,37 +274,37 @@ class TestTrailingStopManager:
         assert events[0].asset == "SHIB"
 
     def test_dynamic_tightening_high(self) -> None:
-        """Per-position unrealized P&L > +2% tightens stops by 40%."""
+        """Per-position unrealized P&L > +5% tightens stops by factor 0.60."""
         mgr = self._make_manager(tightening=True)
 
-        # Entry at 100.0, current at 102.5 → unrealized P&L = +2.5%
-        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=102.5, base_stop_pct=0.06)
-        effective = mgr.compute_effective_stop(pos, current_price=102.5)
-        # 6% × (1 - 0.40) = 3.6%
+        # Entry at 100.0, current at 106.0 → unrealized P&L = +6%
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=106.0, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=106.0)
+        # 6% × 0.60 = 3.6%
         assert abs(effective - 0.036) < 1e-6
 
     def test_dynamic_tightening_medium(self) -> None:
-        """Per-position unrealized P&L +1% to +2% tightens stops by 20%."""
+        """Per-position unrealized P&L +2.5% to +5% tightens stops by factor 0.80."""
         mgr = self._make_manager(tightening=True)
 
-        # Entry at 100.0, current at 101.5 → unrealized P&L = +1.5%
-        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=101.5, base_stop_pct=0.06)
-        effective = mgr.compute_effective_stop(pos, current_price=101.5)
-        # 6% × (1 - 0.20) = 4.8%
+        # Entry at 100.0, current at 103.0 → unrealized P&L = +3%
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=103.0, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=103.0)
+        # 6% × 0.80 = 4.8%
         assert abs(effective - 0.048) < 1e-6
 
     def test_tightening_floor(self) -> None:
-        """Even with 40% tightening, stops never go below 2%."""
+        """Even with 0.60 factor, stops never go below 2%."""
         mgr = self._make_manager(tightening=True)
 
-        # Entry at 100.0, current at 102.5 → +2.5% P&L → 40% tightening
-        # With a 3% base stop: 3% × 0.6 = 1.8% < floor
-        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=102.5, base_stop_pct=0.03)
-        effective = mgr.compute_effective_stop(pos, current_price=102.5)
+        # Entry at 100.0, current at 106.0 → +6% P&L → factor 0.60
+        # With a 3% base stop: 3% × 0.60 = 1.8% < floor
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=106.0, base_stop_pct=0.03)
+        effective = mgr.compute_effective_stop(pos, current_price=106.0)
         assert effective == 0.02  # floor
 
     def test_endgame_stop_override(self) -> None:
-        """End-game stop override takes effect when tighter."""
+        """End-game stop override takes full precedence over dynamic tightening."""
         mgr = self._make_manager()
 
         # Base 6%, endgame 3%
@@ -313,20 +313,80 @@ class TestTrailingStopManager:
         assert abs(effective - 0.03) < 1e-6
 
     def test_endgame_plus_tightening(self) -> None:
-        """When both tightening and endgame apply, take the tighter."""
+        """End-game stop_override takes full precedence, ignoring dynamic tightening."""
         mgr = self._make_manager(tightening=True)
 
-        # Base 6%, tightened by 40% = 3.6%, endgame = 3%
-        # Entry at 100.0, current at 102.5 → +2.5% P&L → 40% tightening
-        # Tightened = 6% × 0.6 = 3.6%, endgame = 3%. Take min(3.6%, 3%) = 3%
-        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=102.5, base_stop_pct=0.06)
-        effective = mgr.compute_effective_stop(pos, current_price=102.5, endgame_stop_override=0.03)
+        # Entry at 100.0, current at 106.0 → +6% P&L → would tighten to 3.6%
+        # But endgame override=0.03 takes full precedence → effective=0.03
+        pos = PositionStop(asset="TEST", entry_price=100.0, peak_price=106.0, base_stop_pct=0.06)
+        effective = mgr.compute_effective_stop(pos, current_price=106.0, endgame_stop_override=0.03)
         assert abs(effective - 0.03) < 1e-6
 
-        # Endgame = 5% is less tight than tightened 3.6%
-        effective2 = mgr.compute_effective_stop(pos, current_price=102.5, endgame_stop_override=0.05)
-        # tightened = 3.6%, endgame = 5%, min(3.6%, 5%) = 3.6%
-        assert abs(effective2 - 0.036) < 1e-6
+        # Endgame override=0.05 also takes precedence over tightened 3.6%
+        effective2 = mgr.compute_effective_stop(pos, current_price=106.0, endgame_stop_override=0.05)
+        assert abs(effective2 - 0.05) < 1e-6
+
+    # ------------------------------------------------------------------
+    # get_effective_stop_distance tests
+    # ------------------------------------------------------------------
+
+    def test_get_effective_no_tightening_below_mid_threshold(self) -> None:
+        """No tightening when unrealized P&L < +2.5%."""
+        mgr = self._make_manager(tightening=True)
+        effective = mgr.get_effective_stop_distance(
+            base_stop_pct=0.06, entry_price=100.0, current_price=102.0  # +2.0%
+        )
+        assert abs(effective - 0.06) < 1e-6
+
+    def test_get_effective_mid_tightening(self) -> None:
+        """Factor 0.80 applied between +2.5% and +5% unrealized P&L."""
+        mgr = self._make_manager(tightening=True)
+        effective = mgr.get_effective_stop_distance(
+            base_stop_pct=0.06, entry_price=100.0, current_price=103.5  # +3.5%
+        )
+        # 6% × 0.80 = 4.8%
+        assert abs(effective - 0.048) < 1e-6
+
+    def test_get_effective_high_tightening(self) -> None:
+        """Factor 0.60 applied above +5% unrealized P&L."""
+        mgr = self._make_manager(tightening=True)
+        effective = mgr.get_effective_stop_distance(
+            base_stop_pct=0.06, entry_price=100.0, current_price=108.0  # +8%
+        )
+        # 6% × 0.60 = 3.6%
+        assert abs(effective - 0.036) < 1e-6
+
+    def test_get_effective_floor_with_extreme_gains(self) -> None:
+        """Floor at 2% even with extreme gains (+50%)."""
+        mgr = self._make_manager(tightening=True)
+        # base 3% × 0.60 = 1.8% < 2% floor
+        effective = mgr.get_effective_stop_distance(
+            base_stop_pct=0.03, entry_price=100.0, current_price=150.0  # +50%
+        )
+        assert effective == 0.02
+
+    def test_get_effective_stop_override_takes_precedence(self) -> None:
+        """stop_override replaces dynamic tightening entirely."""
+        mgr = self._make_manager(tightening=True)
+        # +8% P&L would tighten to 3.6%, but override=0.03 takes precedence
+        effective = mgr.get_effective_stop_distance(
+            base_stop_pct=0.06,
+            entry_price=100.0,
+            current_price=108.0,
+            stop_override=0.03,
+        )
+        assert abs(effective - 0.03) < 1e-6
+
+    def test_get_effective_stop_override_respects_floor(self) -> None:
+        """stop_override still cannot go below min_stop_floor."""
+        mgr = self._make_manager(tightening=True)
+        effective = mgr.get_effective_stop_distance(
+            base_stop_pct=0.06,
+            entry_price=100.0,
+            current_price=108.0,
+            stop_override=0.01,  # below 2% floor
+        )
+        assert effective == 0.02
 
     def test_restore_position(self) -> None:
         mgr = self._make_manager()

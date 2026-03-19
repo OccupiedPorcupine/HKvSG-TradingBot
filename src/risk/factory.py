@@ -45,7 +45,7 @@ def create_trailing_stop_manager(
     # Phase 1: no dynamic tightening
     tightening_config = None
     if phase >= 2:
-        tightening_config = config.get("risk.stop_tightening", {})
+        tightening_config = config.get("dynamic_stops", {})
 
     return TrailingStopManager(
         base_stops=base_stops,
