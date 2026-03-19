@@ -120,3 +120,12 @@ PHASED DELIVERY (implement only the phase you are told):
   Phase 3: ML enhancement — LightGBM overlay, IC monitoring, beta targeting,
            ML sizing multiplier, post-retrain sanity check.
   Phase 4: Manual parameter tuning based on live observation.
+
+
+a. FeatureEngine file path: src/data/features.py:54:class FeatureEngine:
+b. RegimeState enum location and values: src/regime/regime_state.py; RegimeType (TREND_BULL, TREND_BEAR, MEAN_REVERT, HIGH_VOL_CRISIS)
+c. Which Phase 2 modules are stubs vs partially implemented: RegimeDetector (Partial), MemePool (Stub), AdaptiveSizing (Stub), MLOverlay (Stub/Empty), PAXGAllocator (Missing), EndgameManager (Missing)
+d. RiskManager.check_stops() method signature: Does not exist; uses unified tick(self, current_prices, tracker, contagion_ratio=0.0, avg_loss=0.0, daily_pnl_pct=0.0, endgame_stop_override=None)
+e. PortfolioConstructor.construct() current signature: Named compute(self, regime, btc_vol_percentile, selected_assets, current_weights, current_nav)
+f. Config loading pattern (e.g., config['regime']['breadth_bull_threshold']
+or config.regime.breadth_bull_threshold): config.get("dotted.key", default)

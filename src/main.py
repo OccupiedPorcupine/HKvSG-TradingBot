@@ -329,17 +329,13 @@ async def main():
         if feature_engine._regime_inputs is None:
             logger.debug("Regime update skipped — waiting for first price bar.")
             return
-        # W-01/W-05: compute live contagion rather than passing hardcoded 0.0
-        held_assets = list(position_tracker.positions.keys())
-        live_contagion = contagion_probe.compute(
-            held_assets=held_assets,
-            get_return_fn=feature_engine.get_return,
-        )
+        # W-01/W-05: detector now computes contagion internally
         regime_detector.update(
             feature_engine.get_regime_inputs(),
-            live_contagion,
+            position_tracker.positions,
+            feature_engine.get_return,
         )
-        logger.debug("Regime updated: %s (contagion=%.2f)", regime_detector.state.current_regime, live_contagion.contagion_ratio)
+        logger.debug("Regime updated: %s (contagion=%.2f)", regime_detector.state.current_regime, regime_detector.state.contagion_proxy)
 
     async def rebalance_tick():
         """Every 60m: Re-rank signals and rebalance portfolio."""
@@ -531,14 +527,10 @@ async def main():
             feature_engine.warm_start() 
             
             # Update regime immediately so first rebalance uses current market state
-            held_assets = list(position_tracker.positions.keys())
-            live_contagion = contagion_probe.compute(
-                held_assets=held_assets,
-                get_return_fn=feature_engine.get_return,
-            )
             regime_detector.update(
                 feature_engine.get_regime_inputs(),
-                live_contagion,
+                position_tracker.positions,
+                feature_engine.get_return,
             )
 
             await rebalance_tick()
@@ -553,14 +545,10 @@ async def main():
         if feature_engine._regime_inputs is not None:
              logger.info("Initial data fetch successful — triggering immediate rebalance")
              # Update regime before rebalancing
-             held_assets = list(position_tracker.positions.keys())
-             live_contagion = contagion_probe.compute(
-                 held_assets=held_assets,
-                 get_return_fn=feature_engine.get_return,
-             )
              regime_detector.update(
                  feature_engine.get_regime_inputs(),
-                 live_contagion,
+                 position_tracker.positions,
+                 feature_engine.get_return,
              )
              await rebalance_tick()
 

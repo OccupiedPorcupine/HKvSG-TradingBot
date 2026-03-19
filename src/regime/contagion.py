@@ -3,6 +3,9 @@
 Runs every 1-minute bar. Computes the fraction of held positions with
 negative 5-minute returns and the average loss magnitude among those.
 
+Small portfolio override (<6 positions): uses raised thresholds
+(ratio 0.90, loss 1.5%) to avoid false positives with few positions.
+
 This is a Layer 3 computation consumed by:
   - Regime detector (classification rule input)
   - Risk layer's ContagionMonitor (circuit breaker trigger)
@@ -10,7 +13,9 @@ This is a Layer 3 computation consumed by:
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
+
+from src.utils.validation import validate_contagion_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +29,14 @@ class ContagionResult:
         avg_loss: Mean of abs(5-min return) for declining positions.
         negative_count: Number of positions with negative 5-min return.
         total_positions: Total number of held positions evaluated.
+        is_small_portfolio: True if portfolio had < small_portfolio_size positions.
     """
 
     contagion_ratio: float
     avg_loss: float
     negative_count: int
     total_positions: int
+    is_small_portfolio: bool = False
 
 
 class ContagionProbe:
@@ -41,35 +48,52 @@ class ContagionProbe:
     Usage::
 
         probe = ContagionProbe(return_window=5)
-        result = probe.compute(positions, feature_engine)
+        result = probe.compute(held_positions, get_return_fn)
         # result.contagion_ratio → fed to regime detector
         # result.avg_loss → fed to regime detector
     """
 
-    def __init__(self, return_window: int = 5) -> None:
+    def __init__(
+        self,
+        return_window: int = 5,
+        small_portfolio_size: int = 6,
+    ) -> None:
         """Initialize the contagion probe.
 
         Args:
             return_window: Return window in minutes for measuring decline.
-                           Default 5 (from config regime.contagion_return_window_min).
+            small_portfolio_size: Portfolios with fewer positions use
+                raised thresholds to avoid false crisis triggers.
         """
         self.return_window = return_window
+        self.small_portfolio_size = small_portfolio_size
 
     def compute(
         self,
-        held_assets: list[str],
-        get_return_fn: "Callable[[str, int], Optional[float]]",
+        held_positions: dict,
+        get_return_fn: Callable[[str, int], Optional[float]],
     ) -> ContagionResult:
         """Compute contagion ratio and average loss for held positions.
 
         Args:
-            held_assets: List of asset symbols currently held.
+            held_positions: Dict of currently held positions (keys = assets).
             get_return_fn: Callable(asset, window_minutes) -> return or None.
                            Typically FeatureEngine.get_return.
 
         Returns:
             ContagionResult with ratio and average loss.
         """
+        # Validate inputs
+        if not validate_contagion_inputs(held_positions, get_return_fn):
+            return ContagionResult(
+                contagion_ratio=0.0,
+                avg_loss=0.0,
+                negative_count=0,
+                total_positions=0,
+            )
+
+        held_assets = list(held_positions.keys())
+
         if not held_assets:
             return ContagionResult(
                 contagion_ratio=0.0,
@@ -81,6 +105,7 @@ class ContagionProbe:
         negative_count = 0
         loss_sum = 0.0
         evaluated = 0
+        is_small = len(held_assets) < self.small_portfolio_size
 
         for asset in held_assets:
             ret = get_return_fn(asset, self.return_window)
@@ -98,6 +123,7 @@ class ContagionProbe:
                 avg_loss=0.0,
                 negative_count=0,
                 total_positions=0,
+                is_small_portfolio=is_small,
             )
 
         ratio = negative_count / evaluated
@@ -108,4 +134,5 @@ class ContagionProbe:
             avg_loss=avg_loss,
             negative_count=negative_count,
             total_positions=evaluated,
+            is_small_portfolio=is_small,
         )

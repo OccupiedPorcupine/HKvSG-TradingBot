@@ -496,3 +496,85 @@ paths:
 random_seeds:
   numpy: 42
   lightgbm: 42
+
+# ============================================================
+# PHASE 2 PARAMETERS
+# ============================================================
+
+regime:
+  btc_symbol: "BTC"
+  breadth_bull_threshold: 0.55         # fraction of altcoins positive (4h)
+  breadth_bear_threshold: 0.40
+  contagion_ratio_threshold: 0.80
+  contagion_loss_threshold: 0.01       # 1% avg 5min loss
+  contagion_small_portfolio_size: 6
+  contagion_small_ratio_threshold: 0.90
+  contagion_small_loss_threshold: 0.015
+  btc_vol_crisis_percentile: 90
+  upgrade_persistence_minutes: 30
+  crisis_exit_persistence_minutes: 30
+
+trend_penalty:
+  ema_short_period: 60                 # minutes
+  ema_long_period: 240
+  penalty_sigma: -0.3
+  broad_downturn_threshold: 0.70       # fraction of universe with bearish EMA
+  broad_downturn_penalty_sigma: -0.15
+
+meme_pool:
+  enabled: true
+  symbols: ["SHIB", "PEPE", "FLOKI", "WIF", "BONK", "PUMP", "PENGU"]
+  max_allocation_per_coin: 0.03
+  top_n: 2
+  active_regimes: ["TREND_BULL"]
+  trailing_stop_pct: 0.08
+
+dynamic_stops:
+  tighten_high_threshold: 0.05         # unrealized PnL above this: heavy tighten
+  tighten_high_factor: 0.60            # multiply base stop by this (40% tighter)
+  tighten_mid_threshold: 0.025         # unrealized PnL above this: moderate tighten
+  tighten_mid_factor: 0.80             # multiply base stop by this (20% tighter)
+  min_stop_floor: 0.02                 # absolute minimum stop: 2%
+
+paxg:
+  symbol: "PAXG"
+  allocation:
+    TREND_BULL: 0.04                   # midpoint of [0.03, 0.05]
+    MEAN_REVERT: 0.075                 # midpoint of [0.05, 0.10]
+    TREND_BEAR: 0.125                  # midpoint of [0.10, 0.15]
+    HIGH_VOL_CRISIS: 0.125             # midpoint of [0.10, 0.15]
+  rebalance_tolerance: 0.01            # don't rebalance if within 1% of target
+
+endgame:
+  schedule:
+    - { hours_remaining: 48, max_exposure: 1.0, stop_override: null }
+    - { hours_remaining: 24, max_exposure: 0.70, stop_override: null }
+    - { hours_remaining: 12, max_exposure: 0.45, stop_override: null }
+    - { hours_remaining: 4, max_exposure: 0.25, stop_override: 0.03 }
+    - { hours_remaining: 1, max_exposure: 0.15, stop_override: 0.02 }
+    - { hours_remaining: 0.25, max_exposure: 0.0, stop_override: null }
+  round_end_utc: "2026-03-31T23:59:00Z"
+
+portfolio:
+  exposure:
+    TREND_BULL: 0.80                   # midpoints, not ranges
+    TREND_BULL_RISING_VOL: 0.65
+    MEAN_REVERT: 0.55
+    TREND_BEAR: 0.35
+    HIGH_VOL_CRISIS: 0.15
+  holdings:
+    TREND_BULL: 10
+    MEAN_REVERT: 6
+    TREND_BEAR: 4
+    HIGH_VOL_CRISIS: 0
+  turnover_max_pct: 0.25
+  min_trade_nav_pct: 0.002
+  tier_caps:
+    tier1: 0.08
+    tier1_doge: 0.05
+    tier2: 0.08
+    tier3: 0.06
+    tier4_meme: 0.03
+    tier5: 0.02
+    trump: 0.02
+    paxg: 0.15
