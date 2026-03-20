@@ -21,6 +21,10 @@ from src.regime.regime_state import RegimeState
 from src.regime.contagion import ContagionResult
 from src.signals.momentum import MomentumSignal
 from src.portfolio.factory import create_portfolio_constructor, get_current_weights, build_orders_from_weights
+from src.signals.trend_penalty import TrendPenaltyEngine
+from src.signals.meme_pool import MemePoolManager
+from src.portfolio.endgame import EndgameManager
+from src.portfolio.paxg_allocator import PAXGAllocator
 from src.risk.factory import create_risk_manager
 from src.execution.roostoo_client import ExecutionClient
 from src.execution.position_tracker import PositionTracker
@@ -142,8 +146,8 @@ async def main():
     # Regime Detection
     regime_detector = RegimeDetector(config.raw)
     
-    # Risk Management
-    risk_manager = create_risk_manager(config, starting_nav=position_tracker.nav, phase=1)
+    # Risk Management — Phase 2: enables dynamic per-position stop tightening
+    risk_manager = create_risk_manager(config, starting_nav=position_tracker.nav, phase=2)
     
     # Signal Generation
     tier_1_3 = set(config.get("universe.tier_1_majors", [])) | \
@@ -151,8 +155,22 @@ async def main():
                set(config.get("universe.tier_3_defi", []))
     momentum_signal = MomentumSignal(config.raw, tier_1_3)
     
+    # Phase 2 components
+    trend_penalty = TrendPenaltyEngine(config.raw)
+    meme_pool_manager = MemePoolManager(config.raw)
+    endgame_manager = EndgameManager(config.raw)
+    paxg_allocator = PAXGAllocator(config.raw)
+
     # Portfolio Construction
-    portfolio_constructor = create_portfolio_constructor(config, phase=1)
+    portfolio_constructor = create_portfolio_constructor(
+        config,
+        regime_detector=regime_detector,
+        trend_penalty=trend_penalty,
+        meme_pool=meme_pool_manager,
+        endgame=endgame_manager,
+        paxg=paxg_allocator,
+        risk_manager=risk_manager,
+    )
     
     # Adaptation Layer (Layer 8) — must be instantiated BEFORE OrderManager
     # which takes signal_health_monitor as a constructor arg (E-01).
@@ -224,6 +242,17 @@ async def main():
             return
         feature_engine.on_new_bar()
 
+        # --- Phase 2: Trend Penalty EMA Updates ---
+        # Feed latest prices to trend penalty engine so EMAs warm up.
+        # Each asset needs ~240 bars (4h) before penalties activate.
+        try:
+            for asset in ingestion.get_all_assets():
+                price = ingestion.get_latest_price(asset)
+                if price is not None:
+                    trend_penalty.update_price(asset, price)
+        except Exception as _tp_err:
+            logger.error("TREND_PENALTY update failed (non-fatal): %s", _tp_err)
+
         # 3. Debug heartbeat (disable before competition)
         if debug_tick_enabled and debug_watch:
             parts = []
@@ -260,33 +289,56 @@ async def main():
                           for a in ingestion.get_all_assets()
                           if ingestion.get_latest_price(a) is not None}
 
+        # --- Phase 2: Contagion Probe ---
         # Compute live contagion ratio from held positions (W-01/E-09/W-05).
-        held_assets = list(position_tracker.positions.keys())
-        contagion_result = contagion_probe.compute(
-            held_assets=held_assets,
-            get_return_fn=feature_engine.get_return,
-        )
+        # FIX: pass positions dict (not list), use correct kwarg name.
+        contagion_ratio = 0.0
+        avg_loss = 0.0
+        try:
+            contagion_result = contagion_probe.compute(
+                held_positions=position_tracker.positions,
+                get_return_fn=feature_engine.get_return,
+            )
+            contagion_ratio = contagion_result.contagion_ratio
+            avg_loss = contagion_result.avg_loss
+        except Exception as _cg_err:
+            logger.error("CONTAGION_PROBE failed (non-fatal): %s. Using defaults.", _cg_err)
 
         # E-08: compute actual daily P&L so the daily-loss circuit breaker fires.
         daily_pnl_pct = risk_manager.get_daily_pnl_pct(position_tracker.nav)
 
-        # Run 1-min risk checks
-        risk_events = risk_manager.tick(
-            current_prices=current_prices,
-            tracker=position_tracker,
-            contagion_ratio=contagion_result.contagion_ratio,  # W-01: was hardcoded 0.0
-            avg_loss=contagion_result.avg_loss,
-            daily_pnl_pct=daily_pnl_pct,  # E-08: was always 0.0
-        )
-        
-        # Convert RiskEvents to Orders
+        # --- Phase 2: Endgame Stop Override ---
+        # Pass endgame stop override to trailing stops for dynamic tightening.
+        endgame_stop_override = None
+        try:
+            endgame_constraints = endgame_manager.get_constraints()
+            endgame_stop_override = endgame_constraints.get("stop_override")
+        except Exception as _eg_err:
+            logger.error("ENDGAME get_constraints failed (non-fatal): %s", _eg_err)
+            endgame_constraints = {"sell_all": False, "max_exposure": 1.0,
+                                   "stop_override": None, "hours_remaining": float("inf")}
 
+        # Run 1-min risk checks
+        risk_events = []
+        try:
+            risk_events = risk_manager.tick(
+                current_prices=current_prices,
+                tracker=position_tracker,
+                contagion_ratio=contagion_ratio,
+                avg_loss=avg_loss,
+                daily_pnl_pct=daily_pnl_pct,
+                endgame_stop_override=endgame_stop_override,
+            )
+        except Exception as _rm_err:
+            logger.error("RISK_MANAGER tick failed (non-fatal): %s", _rm_err)
+
+        # Convert RiskEvents to Orders
         for event in risk_events:
             asset = event.asset
             pos = position_tracker.get_position(asset)
             if not pos:
                 continue
-                
+
             qty_usd = pos.market_value
             order = PendingOrder(
                 asset=asset,
@@ -300,10 +352,10 @@ async def main():
                 target_weight=0.0
             )
             order_queue.add(order)
-            
-        # End-game sell-all check (runs every 60s to catch T-1h threshold)
-        _, _, sell_all_now = portfolio_constructor.get_endgame_cap()
-        if sell_all_now:
+
+        # --- Phase 2: Endgame Sell-All Check ---
+        # Runs every 60s to catch T-15min threshold. Non-negotiable liquidation.
+        if endgame_constraints.get("sell_all", False):
             for asset, pos in position_tracker.positions.items():
                 order = PendingOrder(
                     asset=asset,
@@ -329,13 +381,25 @@ async def main():
         if feature_engine._regime_inputs is None:
             logger.debug("Regime update skipped — waiting for first price bar.")
             return
-        # W-01/W-05: detector now computes contagion internally
-        regime_detector.update(
-            feature_engine.get_regime_inputs(),
-            position_tracker.positions,
-            feature_engine.get_return,
+        # --- Phase 2: Regime Detection ---
+        # Detector computes contagion internally; uses asymmetric transitions.
+        # On failure, regime stays at its current value (safe: no spurious transitions).
+        try:
+            regime_detector.update(
+                feature_engine.get_regime_inputs(),
+                position_tracker.positions,
+                feature_engine.get_return,
+            )
+        except Exception as _rd_err:
+            logger.error(
+                "REGIME_DETECTOR failed (non-fatal): %s. Keeping current regime %s",
+                _rd_err, regime_detector.current_regime.value,
+            )
+        logger.debug(
+            "Regime updated: %s (contagion=%.2f)",
+            regime_detector.state.current_regime,
+            regime_detector.state.contagion_proxy,
         )
-        logger.debug("Regime updated: %s (contagion=%.2f)", regime_detector.state.current_regime, regime_detector.state.contagion_proxy)
 
     async def rebalance_tick():
         """Every 60m: Re-rank signals and rebalance portfolio."""
@@ -354,13 +418,16 @@ async def main():
 
         # 1. Signals
         scores = feature_engine.get_momentum_scores()
-        selections = momentum_signal.generate(
-            momentum_scores=scores,
-            regime=regime_detector.state,
-            get_ema_fn=feature_engine.get_ema_values,
-            get_vol_fn=feature_engine.get_asset_volatility,
-            sentiment_scores=feature_engine.get_sentiment_scores(),
-        )
+        try:
+            selections = momentum_signal.generate(
+                momentum_scores=scores,
+                regime=regime_detector.state,
+                get_ema_fn=feature_engine.get_ema_values,
+                get_vol_fn=feature_engine.get_asset_volatility,
+                sentiment_scores=feature_engine.get_sentiment_scores(),
+            )
+        except Exception as _sig_err:
+            logger.error("MOMENTUM_SIGNAL failed (non-fatal): %s. Using raw scores.", _sig_err)
 
         # Update order manager context so every order this cycle logs the correct
         # regime and momentum score (audit Section 5 Screen 1 compliance).
@@ -368,27 +435,37 @@ async def main():
             regime_state=regime_detector.state.current_regime.value,
             momentum_scores=scores,
         )
-        
-        # 2. Portfolio Construction
-        regime_inputs = feature_engine.get_regime_inputs()
+
+        # --- Phase 2: Portfolio Construction (regime-conditional pipeline) ---
         current_weights = get_current_weights(position_tracker)
-        target_weights, construct_events = portfolio_constructor.compute(
-            regime=regime_detector.state.current_regime.value,
-            btc_vol_percentile=regime_inputs.btc_vol_percentile or 50.0,
-            selected_assets=list(selections.keys()),
-            current_weights=current_weights,
-            current_nav=position_tracker.nav,
-        )
+        try:
+            construction_result = portfolio_constructor.construct(
+                momentum_scores=scores,
+                current_positions=current_weights,
+                nav=position_tracker.nav,
+                market_data=feature_engine,
+            )
+            target_weights = construction_result.target_weights
+        except Exception as _pc_err:
+            logger.error(
+                "PORTFOLIO_CONSTRUCTOR failed: %s. Holding current positions.", _pc_err
+            )
+            target_weights = dict(current_weights)
 
         # 3. Pre-trade Risk Checks
-        max_deployment = portfolio_constructor.get_deployment_target(
-            regime_detector.state.current_regime.value,
-            regime_inputs.btc_vol_percentile or 50.0,
-        )
-        final_weights, risk_events = risk_manager.pre_trade_check(
-            target_weights, max_deployment
-        )
-        
+        try:
+            max_deployment = portfolio_constructor._get_target_exposure(
+                regime_detector.current_regime,
+            )
+            final_weights, risk_events = risk_manager.pre_trade_check(
+                target_weights, max_deployment
+            )
+        except Exception as _ptc_err:
+            logger.error(
+                "PRE_TRADE_CHECK failed: %s. Using target weights as-is.", _ptc_err
+            )
+            final_weights = target_weights
+
         ## 4. Queue Orders
         # (Convert weight diffs to USD orders via factory bridge)
         pending_orders = build_orders_from_weights(
@@ -397,12 +474,12 @@ async def main():
             nav=position_tracker.nav,
             pair_suffix=config.get("universe.pair_suffix", "/USD")
         )
-        
+
         for order in pending_orders:
             # Re-apply global min_trade_threshold just in case
             if order.quantity_usd >= (position_tracker.nav * config.get("portfolio.min_trade_threshold_pct_nav", 0.002)):
                 order_queue.add(order)
-            
+
         # 5. Execute
         await order_manager.process_queue()
 
@@ -445,15 +522,24 @@ async def main():
 
         # Performance snapshot to logs/snapshots.jsonl (audit Section 3-3 wiring).
         sh_snap = signal_health_monitor.snapshot()
-        positions_fmt = [
-            {
+        # --- Phase 2: Wire trailing stop distances into position snapshots ---
+        positions_fmt = []
+        for a, p in position_tracker.positions.items():
+            stop_pct = 0.0
+            stop_state = risk_manager.stops.positions.get(a)
+            if stop_state is not None:
+                try:
+                    stop_pct = risk_manager.stops.compute_effective_stop(
+                        stop_state, p.current_price
+                    ) * 100
+                except Exception:
+                    stop_pct = stop_state.base_stop_pct * 100
+            positions_fmt.append({
                 "symbol": a,
                 "weight_pct": round(p.current_weight * 100, 4),
                 "unrealised_pnl_pct": round(p.unrealized_pnl_pct * 100, 4),
-                "stop_distance_pct": 0.0,  # Phase 2: wire trailing stop distance
-            }
-            for a, p in position_tracker.positions.items()
-        ]
+                "stop_distance_pct": round(stop_pct, 2),
+            })
 
         # BTC beta — observability only; must never crash monitoring job.
         btc_beta_value = None
@@ -470,6 +556,16 @@ async def main():
             signal_health=sh_snap,
             btc_beta=btc_beta_value,
         )
+
+        # --- Phase 2: Endgame hours for status reporting ---
+        _endgame_hours = 0.0
+        try:
+            _eg = endgame_manager.get_constraints()
+            _endgame_hours = _eg.get("hours_remaining", 0.0)
+            if _endgame_hours == float("inf"):
+                _endgame_hours = 0.0
+        except Exception:
+            pass
 
         # W-03: write atomic status.json for external monitoring (was never called).
         try:
@@ -492,7 +588,7 @@ async def main():
                 signal_health=sh_snap,
                 risk_flags=[],
                 next_rebalance_utc="",
-                endgame_hours_remaining=0.0,
+                endgame_hours_remaining=_endgame_hours,
                 loop_duration_ms=0.0,
                 api_calls_remaining=0,
                 errors_last_hour=0,
@@ -502,6 +598,32 @@ async def main():
 
         # Flush decision log
         await decision_logger.flush()
+
+    # --- Portfolio Breakdown Debug Log ---
+    async def portfolio_breakdown_tick():
+        """Periodically log current portfolio weights as a debug breakdown."""
+        positions = position_tracker.positions
+        if not positions:
+            logger.debug("Portfolio Breakdown: no open positions")
+            return
+        total_exposure = sum(abs(p.current_weight) for p in positions.values())
+        breakdown_lines = []
+        for ticker, pos in sorted(positions.items(), key=lambda x: -abs(x[1].current_weight)):
+            pct = pos.current_weight * 100
+            chg = pos.unrealized_pnl_pct * 100
+            if chg > 0:
+                indicator = f"▲ +{chg:.2f}%"
+            elif chg < 0:
+                indicator = f"▼ {chg:.2f}%"
+            else:
+                indicator = f"- {chg:.2f}%"
+            breakdown_lines.append(f"  {ticker} - {pct:.2f}%  {indicator}")
+        cash_pct = (1.0 - total_exposure) * 100
+        breakdown_lines.append(f"  CASH - {cash_pct:.2f}%")
+        logger.debug(
+            "Portfolio Breakdown:\n%s",
+            "\n".join(breakdown_lines),
+        )
 
     # 5. Start Scheduler
     scheduler = Scheduler(
@@ -524,8 +646,20 @@ async def main():
                                            if ingestion.get_latest_price(a) is not None})
 
             # We need to ensure features are computed for the initial state
-            feature_engine.warm_start() 
-            
+            feature_engine.warm_start()
+
+            # --- Phase 2: Seed trend penalty EMAs from warm buffers ---
+            # Feed historical prices so penalties can activate immediately
+            # instead of waiting 240 bars (4h) after restart.
+            try:
+                for asset in ingestion.get_all_assets():
+                    price = ingestion.get_latest_price(asset)
+                    if price is not None:
+                        trend_penalty.update_price(asset, price)
+                logger.info("Trend penalty EMAs seeded from warm buffers")
+            except Exception as _tp_err:
+                logger.warning("Trend penalty warm-start seeding failed (non-fatal): %s", _tp_err)
+
             # Update regime immediately so first rebalance uses current market state
             regime_detector.update(
                 feature_engine.get_regime_inputs(),
@@ -560,6 +694,11 @@ async def main():
     await scheduler.schedule_job("regime_update", 300, regime_update_tick, immediate=False)
     await scheduler.schedule_job("rebalance", config.get("portfolio.rebalance_cadence_sec", 3600), rebalance_tick, immediate=False)
     await scheduler.schedule_job("monitoring", 3600, monitoring_tick, immediate=False)
+
+    # --- Portfolio Breakdown (config-driven) ---
+    if config.get("portfolio_breakdown.enabled", False):
+        _pb_cadence = config.get("portfolio_breakdown.cadence_sec", 300)
+        await scheduler.schedule_job("portfolio_breakdown", _pb_cadence, portfolio_breakdown_tick, immediate=False)
 
     # 6. Graceful Shutdown
     loop = asyncio.get_running_loop()
