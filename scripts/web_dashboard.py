@@ -25,7 +25,7 @@ DEFAULT_PORT = 8080
 # Resolved at startup
 _status_path: Path = Path(DEFAULT_STATUS_PATH)
 
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -61,7 +61,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="section" id="positions-section" style="display:none">
   <h2>Positions</h2>
   <table><thead><tr>
-    <th>Asset</th><th>Weight</th><th>P&L</th><th>Entry</th><th>Current</th><th>Stop</th>
+    <th>Asset</th><th>Weight</th><th>Unrealised P&L</th><th>Stop Dist.</th>
   </tr></thead><tbody id="positions"></tbody></table>
 </div>
 
@@ -79,8 +79,9 @@ HTML_PAGE = """<!DOCTYPE html>
 
 <script>
 function pctClass(v) { return v >= 0 ? 'positive' : 'negative'; }
-function fmtPct(v) { return (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%'; }
-function fmtUsd(v) { return '$' + v.toLocaleString('en-US', {maximumFractionDigits: 0}); }
+// Removed * 100 because the backend already passes whole number percentages
+function fmtPct(v) { return (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%'; }
+function fmtUsd(v) { return '$' + Number(v).toLocaleString('en-US', {maximumFractionDigits: 2}); }
 
 function update() {
   fetch('/api/status')
@@ -94,27 +95,30 @@ function update() {
 
 function render(d) {
   const now = Date.now();
-  const ts = new Date(d.timestamp_utc + (d.timestamp_utc.endsWith('Z') ? '' : 'Z'));
+  const tsStr = d.timestamp_utc || d.last_update_utc || '';
+  const ts = tsStr ? new Date(tsStr + (tsStr.endsWith('Z') ? '' : 'Z')) : new Date();
   const ageSec = Math.round((now - ts.getTime()) / 1000);
   const staleClass = ageSec > 120 ? 'stale' : '';
 
+  const uptime = d.uptime_seconds ? Math.round(d.uptime_seconds / 60) + 'm' : 'N/A';
+
   document.getElementById('status-bar').innerHTML =
-    `Regime: <strong>${d.regime}</strong> | ` +
-    `Updated: ${d.timestamp_utc} ` +
+    `Regime: <strong>${d.regime || 'UNKNOWN'}</strong> | ` +
+    `Updated: ${tsStr || 'Unknown'} ` +
     `<span class="${staleClass}">(${ageSec}s ago)</span> | ` +
-    `Uptime: ${Math.round(d.uptime_seconds / 60)}m`;
+    `Uptime: ${uptime}`;
 
   const metrics = [
-    { label: 'NAV', value: fmtUsd(d.nav), cls: 'neutral' },
-    { label: 'Daily P&L', value: fmtPct(d.pnl_daily_pct), cls: pctClass(d.pnl_daily_pct) },
-    { label: 'Total P&L', value: fmtPct(d.pnl_total_pct), cls: pctClass(d.pnl_total_pct) },
-    { label: 'Drawdown', value: fmtPct(d.drawdown_pct), cls: d.drawdown_pct > 0.03 ? 'negative' : 'neutral' },
-    { label: 'Exposure', value: d.crypto_exposure_pct.toFixed(1) + '%', cls: 'neutral' },
-    { label: 'Cash', value: d.cash_pct.toFixed(1) + '%', cls: 'neutral' },
-    { label: 'Positions', value: d.num_positions, cls: 'neutral' },
-    { label: 'Endgame', value: d.endgame_hours_remaining + 'h', cls: d.endgame_hours_remaining < 12 ? 'negative' : 'neutral' },
-    { label: 'Loop', value: d.loop_duration_ms + 'ms', cls: d.loop_duration_ms > 1000 ? 'negative' : 'neutral' },
-    { label: 'Errors/hr', value: d.errors_last_hour, cls: d.errors_last_hour > 0 ? 'negative' : 'positive' },
+    { label: 'NAV', value: fmtUsd(d.nav || 0), cls: 'neutral' },
+    { label: 'Daily P&L', value: fmtPct(d.pnl_daily_pct || 0), cls: pctClass(d.pnl_daily_pct || 0) },
+    { label: 'Total P&L', value: fmtPct(d.pnl_total_pct || 0), cls: pctClass(d.pnl_total_pct || 0) },
+    { label: 'Drawdown (USD)', value: fmtUsd(d.drawdown_pct || 0), cls: (d.drawdown_pct || 0) > 0 ? 'negative' : 'neutral' },
+    { label: 'Exposure', value: (d.crypto_exposure_pct || 0).toFixed(1) + '%', cls: 'neutral' },
+    { label: 'Cash', value: (d.cash_pct || 0).toFixed(1) + '%', cls: 'neutral' },
+    { label: 'Positions', value: d.num_positions || 0, cls: 'neutral' },
+    { label: 'Endgame', value: (d.endgame_hours_remaining || 0) + 'h', cls: (d.endgame_hours_remaining || 0) < 12 ? 'negative' : 'neutral' },
+    { label: 'Loop', value: (d.loop_duration_ms || 0) + 'ms', cls: (d.loop_duration_ms || 0) > 1000 ? 'negative' : 'neutral' },
+    { label: 'Errors/hr', value: d.errors_last_hour || 0, cls: (d.errors_last_hour || 0) > 0 ? 'negative' : 'positive' },
   ];
 
   document.getElementById('metrics').innerHTML = metrics.map(m =>
@@ -127,16 +131,18 @@ function render(d) {
   if (d.positions && d.positions.length > 0) {
     posSection.style.display = '';
     const sorted = d.positions.sort((a, b) => (b.weight_pct || 0) - (a.weight_pct || 0));
-    posEl.innerHTML = sorted.map(p =>
-      `<tr>
-        <td>${p.asset}</td>
-        <td>${(p.weight_pct || 0).toFixed(1)}%</td>
-        <td class="${pctClass(p.pnl_pct || 0)}">${fmtPct((p.pnl_pct || 0) / 100)}</td>
-        <td>${(p.entry_price || 0).toFixed(2)}</td>
-        <td>${(p.current_price || 0).toFixed(2)}</td>
-        <td>${((p.trailing_stop_pct || 0) * 100).toFixed(0)}%</td>
-      </tr>`
-    ).join('');
+    posEl.innerHTML = sorted.map(p => {
+      const sym = p.symbol || p.asset || 'N/A';
+      const w = p.weight_pct || 0;
+      const pnl = p.unrealised_pnl_pct || p.pnl_pct || 0;
+      const stop = p.stop_distance_pct || p.trailing_stop_pct || 0;
+      return `<tr>
+        <td>${sym}</td>
+        <td>${w.toFixed(2)}%</td>
+        <td class="${pctClass(pnl)}">${fmtPct(pnl)}</td>
+        <td>${stop.toFixed(2)}%</td>
+      </tr>`;
+    }).join('');
   } else {
     posSection.style.display = 'none';
   }
@@ -150,11 +156,11 @@ function render(d) {
       const time = (t.timestamp || '').slice(11, 19);
       return `<tr>
         <td>${time}</td>
-        <td>${t.side}</td>
-        <td>${t.asset}</td>
+        <td>${t.side || '-'}</td>
+        <td>${t.asset || '-'}</td>
         <td>${(t.qty || 0).toFixed(4)}</td>
         <td>${fmtUsd(t.price || 0)}</td>
-        <td>${t.reason || ''}</td>
+        <td>${t.reason || '-'}</td>
       </tr>`;
     }).join('');
   } else {
@@ -168,7 +174,7 @@ function render(d) {
   document.getElementById('risk-content').innerHTML =
     `<div class="${flagsClass}">Flags: ${flags.length > 0 ? flags.join(', ') : 'None'}</div>` +
     `<div>Hit Rate: ${((h.hit_rate || 0) * 100).toFixed(0)}% | W/L Ratio: ${(h.winner_loser_ratio || 0).toFixed(2)}</div>` +
-    `<div>API Calls Remaining: ${d.api_calls_remaining} | Next Rebalance: ${d.next_rebalance_utc || '?'}</div>`;
+    `<div>API Calls Remaining: ${d.api_calls_remaining || 'N/A'} | Next Rebalance: ${d.next_rebalance_utc || '?'}</div>`;
 }
 
 update();

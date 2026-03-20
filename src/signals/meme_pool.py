@@ -4,7 +4,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-class MemePoolManager:
+class MemePoolSignal:
     def __init__(self, config: dict):
         """Load pool config. Store allowed symbols as a frozenset for O(1) lookup."""
         meme_cfg = config.get('meme_pool', {})

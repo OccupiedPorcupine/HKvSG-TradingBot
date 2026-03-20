@@ -237,12 +237,20 @@ class RiskManager:
         held_assets = set(tracker.positions.keys())
 
         # Open stops for new positions not yet tracked
+        # Open stops for new positions not yet tracked
         for asset in held_assets - tracked_assets:
             pos = tracker.positions[asset]
             base_stop = self._get_stop_distance(asset)
-            self.stops.open_position(asset, pos.cost_basis, base_stop)
+            
+            # Use current market price if cost_basis is missing (e.g., initial startup sync)
+            initial_price = pos.cost_basis
+            if initial_price <= 0.0 and asset in current_prices:
+                initial_price = current_prices[asset]
+                
+            self.stops.open_position(asset, initial_price, base_stop)
+            
             # Sync peak from position tracker (may be higher if we missed bars)
-            if pos.peak_price_since_entry > pos.cost_basis:
+            if pos.peak_price_since_entry > initial_price:
                 self.stops.positions[asset].peak_price = pos.peak_price_since_entry
 
         # Close stops for positions no longer held
