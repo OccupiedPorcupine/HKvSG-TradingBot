@@ -151,6 +151,67 @@ class TrailingStopManager:
             del self.positions[asset]
             logger.info("Trailing stop closed: %s", asset)
 
+    def get_effective_stop_distance(
+        self,
+        base_stop_pct: float,
+        entry_price: float,
+        current_price: float,
+        stop_override: Optional[float] = None,
+        asset: str = "",
+    ) -> float:
+        """Calculate effective stop distance after dynamic tightening.
+
+        This replaces the v3.0 portfolio-wide daily P&L governor. The old
+        approach tightened ALL stops when portfolio gained >3%, which caused
+        new entries (0% gain) to get tight stops and immediately stop out.
+        Per-position tightening isolates risk management correctly.
+
+        Args:
+            base_stop_pct: Tier-based default (0.06 for Tier 1-3, 0.08 for meme, etc.)
+            entry_price: Position entry price.
+            current_price: Current market price.
+            stop_override: Optional override from endgame de-risking (takes precedence
+                over dynamic tightening entirely).
+            asset: Asset symbol for logging (optional).
+
+        Returns:
+            Effective stop distance as a fraction (e.g., 0.036 for 3.6%).
+            Never below min_stop_floor.
+        """
+        if stop_override is not None:
+            return max(stop_override, self.min_stop_floor)
+
+        effective = base_stop_pct
+
+        if self._tightening_config is not None and entry_price > 0:
+            unrealized_pnl_pct = (current_price - entry_price) / entry_price
+
+            high_threshold = self._tightening_config.get("tighten_high_threshold", 0.05)
+            high_factor = self._tightening_config.get("tighten_high_factor", 0.60)
+            mid_threshold = self._tightening_config.get("tighten_mid_threshold", 0.025)
+            mid_factor = self._tightening_config.get("tighten_mid_factor", 0.80)
+
+            if unrealized_pnl_pct > high_threshold:
+                effective = base_stop_pct * high_factor
+                logger.debug(
+                    "DYNAMIC_STOP: %s tightened %.2f%% → %.2f%% (unrealized_pnl=+%.2f%%)",
+                    asset,
+                    base_stop_pct * 100,
+                    effective * 100,
+                    unrealized_pnl_pct * 100,
+                )
+            elif unrealized_pnl_pct > mid_threshold:
+                effective = base_stop_pct * mid_factor
+                logger.debug(
+                    "DYNAMIC_STOP: %s tightened %.2f%% → %.2f%% (unrealized_pnl=+%.2f%%)",
+                    asset,
+                    base_stop_pct * 100,
+                    effective * 100,
+                    unrealized_pnl_pct * 100,
+                )
+
+        return max(effective, self.min_stop_floor)
+
     def compute_effective_stop(
         self,
         pos: PositionStop,
@@ -158,26 +219,13 @@ class TrailingStopManager:
         endgame_stop_override: Optional[float] = None,
     ) -> float:
         """Compute effective stop distance after tightening based on PER-POSITION P&L."""
-        tightened = pos.base_stop_pct
-        
-        if self._tightening_config is not None and pos.entry_price > 0:
-            # Calculate unrealized P&L for THIS specific position
-            unrealized_pnl_pct = (current_price - pos.entry_price) / pos.entry_price
-            
-            high_threshold = self._tightening_config.get("threshold_high_pnl", 0.05)
-            high_tighten = self._tightening_config.get("tightening_high", 0.40)
-            med_threshold = self._tightening_config.get("threshold_medium_pnl", 0.025)
-            med_tighten = self._tightening_config.get("tightening_medium", 0.20)
-
-            if unrealized_pnl_pct > high_threshold:
-                tightened = pos.base_stop_pct * (1.0 - high_tighten)
-            elif unrealized_pnl_pct > med_threshold:
-                tightened = pos.base_stop_pct * (1.0 - med_tighten)
-
-        if endgame_stop_override is not None:
-            tightened = min(tightened, endgame_stop_override)
-
-        return max(tightened, self.min_stop_floor)
+        return self.get_effective_stop_distance(
+            base_stop_pct=pos.base_stop_pct,
+            entry_price=pos.entry_price,
+            current_price=current_price,
+            stop_override=endgame_stop_override,
+            asset=pos.asset,
+        )
 
     def check_all(
         self,

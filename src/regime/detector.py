@@ -9,6 +9,7 @@ contagion proxy.
 
 Classification rules (Phase 2, in priority order):
     1. contagion_ratio > 0.80 AND avg_loss > 1% → HIGH_VOL_CRISIS (immediate)
+       Small portfolio (<6 positions): ratio > 0.90 AND avg_loss > 1.5%
     2. btc_vol_percentile > 90 → HIGH_VOL_CRISIS (immediate)
     3. btc_4h > 0 AND btc_24h > 0 AND breadth > 55% → TREND_BULL
     4. btc_4h < 0 AND btc_24h < 0 AND breadth < 40% → TREND_BEAR
@@ -23,10 +24,12 @@ All threshold values read from config.yaml.
 """
 
 import logging
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
 
 from src.regime.contagion import ContagionProbe, ContagionResult
 from src.regime.regime_state import RegimeState, RegimeType, is_downgrade, is_upgrade
+from src.utils.validation import validate_regime_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +43,9 @@ class RegimeDetector:
     Usage::
 
         detector = RegimeDetector(config)
-        # Every 5 minutes:
-        detector.update(regime_inputs, contagion_result)
-        state = detector.state
+        # Every 1 minute:
+        state = detector.update(regime_inputs, held_positions, get_return_fn)
+        regime = detector.current_regime
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -53,38 +56,70 @@ class RegimeDetector:
         """
         self._config = config
         self._state = RegimeState()
+        self._cold_start = True
         self._contagion_probe = ContagionProbe(
             return_window=config.get("regime", {})
-            .get("contagion_return_window_min", 5)
+            .get("contagion_return_window_min", 5),
+            small_portfolio_size=config.get("regime", {})
+            .get("contagion_small_portfolio_size", 6),
         )
 
         # Classification thresholds (from config)
-        thresholds = config.get("regime", {}).get("thresholds", {})
+        regime_cfg = config.get("regime", {})
+        thresholds = regime_cfg.get("thresholds", {})
         self._contagion_ratio_crisis = thresholds.get(
-            "contagion_ratio_crisis", 0.80
+            "contagion_ratio_crisis",
+            regime_cfg.get("contagion_ratio_threshold", 0.80),
         )
         self._contagion_avg_loss_crisis = thresholds.get(
-            "contagion_avg_loss_pct", 0.01
+            "contagion_avg_loss_pct",
+            regime_cfg.get("contagion_loss_threshold", 0.01),
         )
         self._btc_vol_pct_crisis = thresholds.get(
-            "btc_vol_percentile_crisis", 90
+            "btc_vol_percentile_crisis",
+            regime_cfg.get("btc_vol_crisis_percentile", 90),
         )
-        self._breadth_bull = thresholds.get("altcoin_breadth_bull", 0.55)
-        self._breadth_bear = thresholds.get("altcoin_breadth_bear", 0.40)
+        self._breadth_bull = thresholds.get(
+            "altcoin_breadth_bull",
+            regime_cfg.get("breadth_bull_threshold", 0.55),
+        )
+        self._breadth_bear = thresholds.get(
+            "altcoin_breadth_bear",
+            regime_cfg.get("breadth_bear_threshold", 0.40),
+        )
+
+        # Small portfolio thresholds
+        self._small_portfolio_size = regime_cfg.get(
+            "contagion_small_portfolio_size", 6
+        )
+        self._small_contagion_ratio = regime_cfg.get(
+            "contagion_small_ratio_threshold", 0.90
+        )
+        self._small_contagion_loss = regime_cfg.get(
+            "contagion_small_loss_threshold", 0.015
+        )
 
         # Transition thresholds
-        transitions = config.get("regime", {}).get("transitions", {})
-        self._upgrade_bars = transitions.get("upgrade_confirmation_bars", 30)
+        transitions = regime_cfg.get("transitions", {})
+        self._upgrade_bars = transitions.get(
+            "upgrade_confirmation_bars",
+            regime_cfg.get("upgrade_persistence_minutes", 30),
+        )
         self._crisis_exit_contagion = transitions.get(
             "crisis_exit_contagion_below", 0.50
         )
         self._crisis_exit_vol = transitions.get("crisis_exit_vol_below", 70)
         self._crisis_exit_bars = transitions.get(
-            "crisis_exit_confirmation_bars", 30
+            "crisis_exit_confirmation_bars",
+            regime_cfg.get("crisis_exit_persistence_minutes", 30),
         )
 
         # Crisis exit tracking
         self._crisis_exit_streak: int = 0
+
+        # Upgrade candidate tracking (datetime-based)
+        self._upgrade_candidate: Optional[RegimeType] = None
+        self._upgrade_candidate_since: Optional[datetime] = None
 
         # Phase 1 vol guard config
         vol_guard = config.get("phase1_vol_guard", {})
@@ -107,28 +142,64 @@ class RegimeDetector:
         return self._state
 
     @property
+    def current_regime(self) -> RegimeType:
+        """Read-only access to current state."""
+        return self._state.current_regime
+
+    @property
+    def minutes_in_current_regime(self) -> int:
+        """How long we've been in this regime (1 bar = 1 minute)."""
+        return self._state.bars_in_current_regime
+
+    @property
     def contagion_probe(self) -> ContagionProbe:
         """Access to the contagion probe for 1-minute updates."""
         return self._contagion_probe
 
     def update(
         self,
-        regime_inputs: "RegimeInputs",
-        contagion: ContagionResult,
-    ) -> RegimeState:
+        regime_inputs: Any,
+        held_positions: dict,
+        get_return_fn: Callable[[str, int], Optional[float]],
+    ) -> RegimeType:
         """Run regime classification on latest inputs.
 
-        Called every 5 minutes by the orchestrator. Contagion is computed
-        separately every 1 minute and passed in.
+        Called every 1 minute by the orchestrator.
 
         Args:
-            regime_inputs: Feature inputs from Layer 2 (BTC returns,
-                           vol percentile, altcoin breadth).
-            contagion: Latest contagion probe result.
+            regime_inputs: Feature inputs from FeatureEngine.get_regime_inputs().
+            held_positions: Dict of currently held positions.
+            get_return_fn: Callable(asset, minutes) -> float for contagion.
 
         Returns:
-            Updated RegimeState.
+            Current RegimeState after transition logic applied.
         """
+        # Cold-start logging
+        if self._cold_start:
+            logger.info(
+                "REGIME COLD_START: defaulting to MEAN_REVERT, "
+                "upgrades require %dmin persistence",
+                self._upgrade_bars,
+            )
+            self._cold_start = False
+
+        # Input validation
+        if not validate_regime_inputs(
+            regime_inputs.btc_4h_return if regime_inputs.btc_4h_return is not None else float("nan"),
+            regime_inputs.btc_24h_return if regime_inputs.btc_24h_return is not None else float("nan"),
+            regime_inputs.altcoin_breadth if regime_inputs.altcoin_breadth is not None else float("nan"),
+            regime_inputs.btc_vol_percentile if regime_inputs.btc_vol_percentile is not None else float("nan"),
+        ):
+            logger.warning(
+                "REGIME: invalid inputs, keeping current regime %s",
+                self._state.current_regime.value,
+            )
+            self._state.bars_in_current_regime += 1
+            return self._state.current_regime
+
+        # Compute contagion
+        contagion = self._contagion_probe.compute(held_positions, get_return_fn)
+
         # Update contagion values in state
         self._state.contagion_proxy = contagion.contagion_ratio
         self._state.avg_loss = contagion.avg_loss
@@ -147,7 +218,7 @@ class RegimeDetector:
         # Increment bar counter
         self._state.bars_in_current_regime += 1
 
-        return self._state
+        return self._state.current_regime
 
     def update_phase1(
         self,
@@ -215,12 +286,13 @@ class RegimeDetector:
 
     def _classify(
         self,
-        inputs: "RegimeInputs",
+        inputs: Any,
         contagion: ContagionResult,
     ) -> RegimeType:
         """Determine candidate regime from current inputs.
 
         Rules applied in priority order — first match wins.
+        Uses raised thresholds for small portfolios (<6 positions).
 
         Args:
             inputs: Regime inputs from Layer 2.
@@ -229,10 +301,18 @@ class RegimeDetector:
         Returns:
             Candidate RegimeType.
         """
+        # Determine contagion thresholds based on portfolio size
+        if contagion.is_small_portfolio:
+            ratio_threshold = self._small_contagion_ratio
+            loss_threshold = self._small_contagion_loss
+        else:
+            ratio_threshold = self._contagion_ratio_crisis
+            loss_threshold = self._contagion_avg_loss_crisis
+
         # Rule 1: Contagion crisis
         if (
-            contagion.contagion_ratio > self._contagion_ratio_crisis
-            and contagion.avg_loss > self._contagion_avg_loss_crisis
+            contagion.contagion_ratio > ratio_threshold
+            and contagion.avg_loss > loss_threshold
         ):
             return RegimeType.HIGH_VOL_CRISIS
 
@@ -277,7 +357,7 @@ class RegimeDetector:
     def _apply_transition(
         self,
         candidate: RegimeType,
-        inputs: "RegimeInputs",
+        inputs: Any,
         contagion: ContagionResult,
     ) -> None:
         """Apply asymmetric transition rules.
@@ -295,19 +375,22 @@ class RegimeDetector:
 
         # Same regime — no transition needed
         if candidate == current:
-            # But if we had a pending upgrade to somewhere else, cancel it
+            # Cancel any pending upgrade to a different target
             if (
                 self._state.transition_pending
                 and self._state.transition_target != candidate
             ):
                 self._state.cancel_upgrade()
-            # If pending upgrade to same target, tick down
+                self._upgrade_candidate = None
+                self._upgrade_candidate_since = None
+            # If pending upgrade to same target (shouldn't happen), cancel
             if (
                 self._state.transition_pending
                 and self._state.transition_target == candidate
             ):
-                # This shouldn't happen (candidate == current), but guard
                 self._state.cancel_upgrade()
+                self._upgrade_candidate = None
+                self._upgrade_candidate_since = None
             self._crisis_exit_streak = 0
             return
 
@@ -319,29 +402,30 @@ class RegimeDetector:
         # --- Downgrade: immediate ---
         if is_downgrade(current, candidate):
             logger.warning(
-                "REGIME DOWNGRADE: %s → %s (immediate). "
-                "btc_vol_pct=%.1f, breadth=%.3f, contagion=%.3f",
+                "REGIME TRANSITION: %s → %s (reason: downgrade, "
+                "btc_4h=%.4f, breadth=%.2f)",
                 current.value,
                 candidate.value,
-                self._state.btc_vol_percentile,
+                inputs.btc_4h_return or 0,
                 inputs.altcoin_breadth or 0,
-                contagion.contagion_ratio,
             )
             self._state.confirm_transition(candidate)
             self._crisis_exit_streak = 0
+            self._upgrade_candidate = None
+            self._upgrade_candidate_since = None
             return
 
         # --- Upgrade: gradual confirmation ---
         if is_upgrade(current, candidate):
             if not self._state.transition_pending:
-                # Start confirmation window. This bar counts as the first
-                # confirming bar, so remaining = total - 1.
+                # Start confirmation window
                 self._state.start_upgrade(
                     candidate, self._upgrade_bars - 1,
                 )
+                self._upgrade_candidate = candidate
+                self._upgrade_candidate_since = datetime.now(timezone.utc)
                 logger.info(
-                    "REGIME UPGRADE pending: %s → %s "
-                    "(need %d confirming bars, 1 counted)",
+                    "REGIME UPGRADE_PENDING: %s → %s (1/%d min elapsed)",
                     current.value,
                     candidate.value,
                     self._upgrade_bars,
@@ -349,26 +433,41 @@ class RegimeDetector:
             elif self._state.transition_target == candidate:
                 # Same target — tick down
                 self._state.transition_bars_remaining -= 1
+                elapsed = self._upgrade_bars - self._state.transition_bars_remaining
                 if self._state.transition_bars_remaining <= 0:
                     logger.info(
-                        "REGIME UPGRADE confirmed: %s → %s "
-                        "(after %d bars)",
+                        "REGIME TRANSITION: %s → %s (reason: upgrade_confirmed, "
+                        "btc_4h=%.4f, breadth=%.2f)",
                         current.value,
                         candidate.value,
-                        self._upgrade_bars,
+                        inputs.btc_4h_return or 0,
+                        inputs.altcoin_breadth or 0,
                     )
                     self._state.confirm_transition(candidate)
+                    self._upgrade_candidate = None
+                    self._upgrade_candidate_since = None
+                else:
+                    logger.info(
+                        "REGIME UPGRADE_PENDING: %s → %s (%d/%d min elapsed)",
+                        current.value,
+                        candidate.value,
+                        elapsed,
+                        self._upgrade_bars,
+                    )
             else:
                 # Different upgrade target — restart
                 self._state.start_upgrade(candidate, self._upgrade_bars)
+                self._upgrade_candidate = candidate
+                self._upgrade_candidate_since = datetime.now(timezone.utc)
                 logger.info(
-                    "REGIME UPGRADE retarget: %s → %s "
-                    "(was targeting %s, restarting)",
+                    "REGIME UPGRADE_PENDING: %s → %s retarget "
+                    "(was %s, restarting, 0/%d min elapsed)",
                     current.value,
                     candidate.value,
                     self._state.transition_target.value
                     if self._state.transition_target
                     else "None",
+                    self._upgrade_bars,
                 )
             return
 
@@ -378,7 +477,7 @@ class RegimeDetector:
     def _handle_crisis_exit(
         self,
         candidate: RegimeType,
-        inputs: "RegimeInputs",
+        inputs: Any,
         contagion: ContagionResult,
     ) -> None:
         """Handle exit from HIGH_VOL_CRISIS.
@@ -403,12 +502,11 @@ class RegimeDetector:
             self._crisis_exit_streak += 1
             if self._crisis_exit_streak >= self._crisis_exit_bars:
                 logger.info(
-                    "CRISIS EXIT confirmed after %d bars. "
-                    "contagion=%.3f, btc_vol_pct=%.1f → %s",
-                    self._crisis_exit_streak,
-                    contagion.contagion_ratio,
-                    btc_vol,
+                    "REGIME TRANSITION: HIGH_VOL_CRISIS → %s "
+                    "(reason: crisis_exit_confirmed, btc_4h=%.4f, breadth=%.2f)",
                     candidate.value,
+                    inputs.btc_4h_return or 0,
+                    inputs.altcoin_breadth or 0,
                 )
                 self._state.confirm_transition(candidate)
                 self._crisis_exit_streak = 0
