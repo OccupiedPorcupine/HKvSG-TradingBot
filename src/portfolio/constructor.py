@@ -1,302 +1,574 @@
-"""Portfolio construction — target weight computation (Layer 5).
+"""Portfolio construction — regime-conditional target weight computation (Layer 5).
 
-Computes TargetPortfolio: a dict mapping each asset to a target weight
-(0.0–1.0) where weights sum to <= 1.0 (remainder is cash).
+Integrates: regime detection → exposure targeting → momentum ranking →
+trend penalty → position sizing → meme pool → PAXG → turnover control.
 
-Steps implemented:
-  1. Deployment target (regime-conditional)
-  1b. Adaptive exposure adjustment (Phase 2+)
-  1c. End-game de-risking cap (hardcoded)
-  2. PAXG allocation (from cash buffer)
-  3. Per-asset weight computation (arithmetic — no optimizer)
-  4. Turnover constraint
-  5. Minimum trade threshold
-  6. BTC beta monitoring (Phase 2+, logged only)
+Each step is a private method. The construct() method reads as a narrative
+of the strategy for Screen 4 judges.
 
-Phase 1: equal-weight sizing + tier caps. No vol adjustment, no PAXG,
-no meme/Tier5 pools, no adaptive exposure. Simple T-1h sell-all.
+Phase 2: inverse-volatility sizing, regime-aware exposure, meme pool,
+PAXG allocation from cash buffer, endgame de-risking, turnover constraints.
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
-from src.risk.risk_event import EventType, RiskEvent, Severity
+from src.regime.regime_state import RegimeType
+from src.utils.validation import validate_momentum_scores
 
 logger = logging.getLogger(__name__)
 
 
-class PortfolioConstructor:
-    """Computes target portfolio weights from signals and regime.
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
 
-    Usage::
-
-        constructor = PortfolioConstructor(config)
-        target_weights, risk_events = constructor.compute(
-            regime_state=regime,
-            selected_assets=["BTC", "ETH", ...],
-            current_weights={"BTC": 0.08, ...},
-            current_nav=1_000_000,
-        )
+@dataclass
+class ConstructionResult:
+    """Output of the portfolio construction pipeline.
 
     Attributes:
-        regime_targets: Deployment targets per regime.
-        tier_caps: Per-asset/tier weight caps.
-        max_crypto_exposure: Hard cap on total crypto exposure.
+        target_weights: {symbol: target_weight} where weights sum to <= 1.0.
+        orders: Simple order dicts describing changes needed.
+        metadata: Regime, exposure, decisions for logging and audit.
+    """
+
+    target_weights: dict[str, float]
+    orders: list[dict]
+    metadata: dict
+
+
+# ---------------------------------------------------------------------------
+# Portfolio Constructor
+# ---------------------------------------------------------------------------
+
+class PortfolioConstructor:
+    """Regime-conditional portfolio construction.
+
+    Integrates: regime detection → exposure targeting → momentum ranking →
+    trend penalty → position sizing → meme pool → PAXG → turnover control.
+
+    Each step is a private method. The construct() method reads as a
+    narrative of the strategy for Screen 4 judges.
     """
 
     def __init__(
         self,
-        regime_targets: dict[str, float],
-        tier_caps: dict[str, float],
-        asset_tier_map: dict[str, str],
-        tier_cap_defaults: dict[str, float],
-        btc_vol_high_vol_threshold: float = 70.0,
-        max_crypto_exposure: float = 0.90,
-        max_turnover: float = 0.25,
-        min_trade_threshold: float = 0.002,
-        paxg_allocation: Optional[dict[str, float]] = None,
-        endgame_schedule: Optional[list[dict]] = None,
-        final_sell_minutes: float = 15.0,
-        competition_end_utc: Optional[datetime] = None,
-        redistribution_max_iterations: int = 5,
+        config: dict,
+        regime_detector: Any,
+        trend_penalty: Any,
+        meme_pool: Any,
+        endgame: Any,
+        paxg: Any,
+        risk_manager: Any = None,
     ) -> None:
-        """Initialize portfolio constructor from config.
+        """Dependency injection. All Phase 2 components passed by reference.
 
         Args:
-            regime_targets: Map of regime key -> deployment fraction.
-                Keys: trend_bull_low_vol, trend_bull_high_vol, mean_revert,
-                      trend_bear, crisis.
-            tier_caps: Per-asset cap overrides (e.g., {"DOGE": 0.05}).
-            asset_tier_map: Map of asset -> tier key.
-            tier_cap_defaults: Map of tier key -> default cap.
-            btc_vol_high_vol_threshold: BTC vol percentile above which
-                TREND_BULL uses high_vol target.
-            max_crypto_exposure: Hard cap on total crypto exposure.
-            max_turnover: Maximum one-way turnover per rebalance.
-            min_trade_threshold: Minimum weight change to trigger a trade.
-            paxg_allocation: Map of regime -> PAXG allocation fraction.
-            endgame_schedule: End-game de-risking schedule from config.
-            final_sell_minutes: Minutes before competition end to sell all.
-            competition_end_utc: Competition end timestamp.
-            redistribution_max_iterations: Max cap redistribution iterations.
+            config: Full config dict (or Config wrapper).
+            regime_detector: RegimeDetector instance for current_regime.
+            trend_penalty: TrendPenaltyEngine for score adjustments.
+            meme_pool: MemePoolManager for meme coin selections.
+            endgame: EndgameManager for time-based de-risking.
+            paxg: PAXGAllocator for PAXG target weights.
+            risk_manager: RiskManager (optional, for risk-exit bypass).
         """
-        self._regime_targets = regime_targets
-        self._tier_caps = tier_caps
-        self._asset_tier_map = asset_tier_map
-        self._tier_cap_defaults = tier_cap_defaults
-        self._vol_threshold = btc_vol_high_vol_threshold
-        self._max_exposure = max_crypto_exposure
-        self._max_turnover = max_turnover
-        self._min_trade = min_trade_threshold
-        self._paxg_alloc = paxg_allocation or {}
-        self._endgame = endgame_schedule or []
-        self._final_sell_min = final_sell_minutes
-        self._comp_end = competition_end_utc
-        self._max_redist_iter = redistribution_max_iterations
+        self.regime_detector = regime_detector
+        self.trend_penalty = trend_penalty
+        self.meme_pool = meme_pool
+        self.endgame = endgame
+        self.paxg = paxg
+        self.risk_manager = risk_manager
 
-    # ------------------------------------------------------------------
-    # Step 1: Deployment target
-    # ------------------------------------------------------------------
+        # Read config (support both raw dict and Config wrapper)
+        self._cfg = config
+        self._read_config(config)
 
-    def get_deployment_target(
-        self,
-        regime: str,
-        btc_vol_percentile: float = 50.0,
-    ) -> float:
-        """Determine crypto deployment fraction from regime state.
+        # Track last construction for explain()
+        self._last_metadata: dict = {}
 
-        Args:
-            regime: Current regime string (TREND_BULL, TREND_BEAR,
-                MEAN_REVERT, HIGH_VOL_CRISIS).
-            btc_vol_percentile: BTC volatility percentile (0-100).
+    def _read_config(self, config: Any) -> None:
+        """Load all parameters from config. No magic numbers."""
+        _get = self._cfg_get
 
-        Returns:
-            Target crypto deployment as fraction of NAV.
-        """
-        if regime == "TREND_BULL":
-            if btc_vol_percentile > self._vol_threshold:
-                key = "trend_bull_high_vol"
-            else:
-                key = "trend_bull_low_vol"
-        elif regime == "MEAN_REVERT":
-            key = "mean_revert"
-        elif regime == "TREND_BEAR":
-            key = "trend_bear"
-        elif regime == "HIGH_VOL_CRISIS":
-            key = "crisis"
-        else:
-            logger.warning("Unknown regime '%s', defaulting to mean_revert", regime)
-            key = "mean_revert"
-
-        target = self._regime_targets.get(key, 0.55)
-        logger.debug(
-            "Deployment target: regime=%s vol_pctile=%.0f -> %.2f%%",
-            regime, btc_vol_percentile, target * 100,
-        )
-        return target
-
-    # ------------------------------------------------------------------
-    # Step 1c: End-game de-risking
-    # ------------------------------------------------------------------
-
-    def get_endgame_cap(self) -> tuple[Optional[float], Optional[float], bool]:
-        """Compute end-game exposure cap based on time remaining.
-
-        Returns:
-            Tuple of (max_exposure_cap, stop_override, sell_all_now).
-            Any may be None if no end-game restriction applies.
-        """
-        if self._comp_end is None:
-            return None, None, False
-
-        now = datetime.now(timezone.utc)
-        remaining = self._comp_end - now
-        hours_remaining = remaining.total_seconds() / 3600.0
-        minutes_remaining = remaining.total_seconds() / 60.0
-
-        # Final forced sell
-        if minutes_remaining <= self._final_sell_min:
-            logger.critical(
-                "ENDGAME SELL ALL: %.1f minutes remaining", minutes_remaining,
-            )
-            return 0.0, None, True
-
-        # Check schedule (sorted descending by hours_remaining)
-        cap = None
-        stop_override = None
-        for entry in sorted(self._endgame, key=lambda e: e["hours_remaining"], reverse=True):
-            if hours_remaining <= entry["hours_remaining"]:
-                cap = entry["max_exposure"]
-                stop_override = entry.get("stop_override")
-
-        if cap is not None:
-            logger.info(
-                "Endgame cap active: %.1f hours remaining -> cap=%.2f%% stop=%s",
-                hours_remaining,
-                cap * 100,
-                f"{stop_override:.2%}" if stop_override else "none",
-            )
-
-        return cap, stop_override, False
-
-    # ------------------------------------------------------------------
-    # Step 2: PAXG allocation
-    # ------------------------------------------------------------------
-
-    def get_paxg_weight(self, regime: str) -> float:
-        """Compute PAXG allocation from cash buffer.
-
-        PAXG allocation comes from the cash portion, not from crypto
-        deployment. Never apply momentum or ML signals to PAXG.
-
-        Args:
-            regime: Current regime string.
-
-        Returns:
-            PAXG target weight as fraction of NAV.
-        """
-        regime_key_map = {
-            "TREND_BULL": "trend_bull",
-            "MEAN_REVERT": "mean_revert",
-            "TREND_BEAR": "trend_bear",
-            "HIGH_VOL_CRISIS": "crisis",
+        # Exposure targets by regime
+        self._exposure_targets: dict[str, float] = {
+            "TREND_BULL": _get("portfolio.exposure.TREND_BULL", 0.80),
+            "TREND_BULL_RISING_VOL": _get("portfolio.exposure.TREND_BULL_RISING_VOL", 0.65),
+            "MEAN_REVERT": _get("portfolio.exposure.MEAN_REVERT", 0.55),
+            "TREND_BEAR": _get("portfolio.exposure.TREND_BEAR", 0.35),
+            "HIGH_VOL_CRISIS": _get("portfolio.exposure.HIGH_VOL_CRISIS", 0.15),
         }
-        key = regime_key_map.get(regime, "mean_revert")
-        weight = self._paxg_alloc.get(key, 0.10)
-        hard_cap = self._paxg_alloc.get("hard_cap", 0.15)
-        return min(weight, hard_cap)
 
-    # ------------------------------------------------------------------
-    # Step 3: Per-asset weights (arithmetic — no optimizer)
-    # ------------------------------------------------------------------
+        # Also support Phase 1 config layout as fallback
+        regime_targets = _get("portfolio.regime_targets", {})
+        if regime_targets and "TREND_BULL" not in self._exposure_targets:
+            self._exposure_targets["TREND_BULL"] = regime_targets.get(
+                "trend_bull_low_vol", 0.80
+            )
 
-    def compute_equal_weights(
+        # Max holdings by regime
+        self._holdings: dict[str, int] = {
+            "TREND_BULL": _get("portfolio.holdings.TREND_BULL", 10),
+            "MEAN_REVERT": _get("portfolio.holdings.MEAN_REVERT", 6),
+            "TREND_BEAR": _get("portfolio.holdings.TREND_BEAR", 4),
+            "HIGH_VOL_CRISIS": _get("portfolio.holdings.HIGH_VOL_CRISIS", 0),
+        }
+
+        # Hard cap on total crypto exposure
+        self._max_crypto_exposure: float = _get("portfolio.max_crypto_exposure", 0.90)
+
+        # BTC vol threshold for BULL sub-regime
+        self._btc_vol_threshold: float = _get(
+            "portfolio.btc_vol_high_vol_threshold", 70.0
+        )
+
+        # Turnover and trade thresholds
+        self._max_turnover: float = _get("portfolio.turnover_max_pct",
+                                          _get("portfolio.max_turnover_per_rebalance", 0.25))
+        self._min_trade: float = _get("portfolio.min_trade_nav_pct",
+                                       _get("portfolio.min_trade_threshold_pct_nav", 0.002))
+
+        # Tier caps
+        tier_caps_cfg = _get("portfolio.tier_caps", {})
+        self._tier_cap_defaults: dict[str, float] = {
+            "tier1": tier_caps_cfg.get("tier1", _get("tier_caps.tier_1_2", 0.08)),
+            "tier2": tier_caps_cfg.get("tier2", _get("tier_caps.tier_1_2", 0.08)),
+            "tier3": tier_caps_cfg.get("tier3", _get("tier_caps.tier_3", 0.06)),
+            "tier4_meme": tier_caps_cfg.get("tier4_meme", _get("tier_caps.tier_4_meme", 0.03)),
+            "tier5": tier_caps_cfg.get("tier5", _get("tier_caps.tier_5_obscure", 0.02)),
+            # Combined tier_1_2 key for backward compat
+            "tier_1_2": _get("tier_caps.tier_1_2", 0.08),
+            "tier_3": _get("tier_caps.tier_3", 0.06),
+            "tier_4_meme": _get("tier_caps.tier_4_meme", 0.03),
+            "tier_5_obscure": _get("tier_caps.tier_5_obscure", 0.02),
+        }
+
+        # Per-asset cap overrides
+        self._asset_cap_overrides: dict[str, float] = {
+            "DOGE": tier_caps_cfg.get("tier1_doge", _get("tier_caps.doge", 0.05)),
+            "TRUMP": tier_caps_cfg.get("trump", _get("tier_caps.trump", 0.02)),
+            "PAXG": tier_caps_cfg.get("paxg", _get("tier_caps.paxg", 0.15)),
+        }
+
+        # Asset-to-tier mapping (built from universe config)
+        self._asset_tier_map: dict[str, str] = self._build_tier_map(config)
+
+        # Redistribution iterations
+        self._max_redist_iter: int = _get("tier_caps.redistribution_max_iterations", 5)
+
+        # Vol filter multiplier
+        self._vol_filter_multiplier: float = _get(
+            "signals.vol_exclusion_multiplier", 2.0
+        )
+
+    def _cfg_get(self, key: str, default: Any = None) -> Any:
+        """Get config value supporting both dict and Config wrapper."""
+        # For Config wrapper objects (non-dict) with dot-path .get()
+        if not isinstance(self._cfg, dict) and hasattr(self._cfg, 'get'):
+            try:
+                val = self._cfg.get(key, default)
+                if val is not None:
+                    return val
+            except (KeyError, TypeError):
+                pass
+
+        # Raw dict: traverse nested keys via dot-path
+        if isinstance(self._cfg, dict):
+            parts = key.split(".")
+            node = self._cfg
+            for part in parts:
+                if isinstance(node, dict) and part in node:
+                    node = node[part]
+                else:
+                    return default
+            return node
+
+        return default
+
+    def _build_tier_map(self, config: Any) -> dict[str, str]:
+        """Build asset → tier mapping from universe config."""
+        tier_map: dict[str, str] = {}
+        _get = self._cfg_get
+
+        for asset in _get("universe.tier_1_majors", []):
+            tier_map[asset] = "tier_1_2"
+        for asset in _get("universe.tier_2_large_alts", []):
+            tier_map[asset] = "tier_1_2"
+        for asset in _get("universe.tier_3_defi", []):
+            tier_map[asset] = "tier_3"
+        for asset in _get("universe.tier_4_meme", []):
+            tier_map[asset] = "tier_4_meme"
+        for asset in _get("universe.tier_5_obscure", []):
+            tier_map[asset] = "tier_5_obscure"
+
+        tier_map["PAXG"] = "special"
+        tier_map["TRUMP"] = "special"
+        return tier_map
+
+    # ==================================================================
+    # Main entry point
+    # ==================================================================
+
+    def construct(
         self,
-        selected_assets: list[str],
-        deployment: float,
-    ) -> dict[str, float]:
-        """Compute equal-weight allocation for selected assets.
+        momentum_scores: dict[str, float],
+        current_positions: dict[str, float],
+        nav: float,
+        market_data: Any = None,
+    ) -> ConstructionResult:
+        """Execute the full construction pipeline.
 
-        Phase 1: no volatility adjustment. Just equal weight + tier caps.
+        Called every rebalance (~60 minutes). Each step is a private
+        method with a descriptive name so judges can follow the logic.
 
         Args:
-            selected_assets: Assets selected by momentum signal.
-            deployment: Total crypto deployment fraction.
+            momentum_scores: {symbol: composite_score} from signal layer.
+            current_positions: {symbol: current_weight} from position tracker.
+            nav: Current portfolio NAV in USD.
+            market_data: FeatureEngine or equivalent for vol data.
 
         Returns:
-            Dict of asset -> target weight.
+            ConstructionResult with target_weights, orders, and metadata.
         """
-        if not selected_assets:
-            return {}
+        # ---- Guard: zero or negative NAV ----
+        if nav <= 0:
+            logger.error("PORTFOLIO: NAV=%.2f is non-positive, returning empty portfolio", nav)
+            return ConstructionResult(
+                target_weights={},
+                orders=[],
+                metadata={"error": "non_positive_nav", "nav": nav},
+            )
 
-        n = len(selected_assets)
-        base_weight = deployment / n
-        weights = {asset: base_weight for asset in selected_assets}
-        return weights
+        # ---- Guard: no momentum scores (data outage) ----
+        if not momentum_scores:
+            logger.warning(
+                "PORTFOLIO: no momentum scores available, holding current positions"
+            )
+            return ConstructionResult(
+                target_weights=dict(current_positions),
+                orders=[],
+                metadata={"reason": "no_momentum_scores", "action": "hold_current"},
+            )
 
-    def compute_vol_adjusted_weights(
+        # Clean NaN scores
+        momentum_scores = validate_momentum_scores(momentum_scores)
+        if not momentum_scores:
+            logger.warning(
+                "PORTFOLIO: all momentum scores invalid after validation, holding current"
+            )
+            return ConstructionResult(
+                target_weights=dict(current_positions),
+                orders=[],
+                metadata={"reason": "all_scores_invalid", "action": "hold_current"},
+            )
+
+        # ----------------------------------------------------------
+        # Step 1: Get current regime
+        # ----------------------------------------------------------
+        regime = self.regime_detector.current_regime
+        logger.info("PORTFOLIO Step 1: regime=%s", regime.value)
+
+        # ----------------------------------------------------------
+        # Step 2: Determine exposure target for this regime
+        # ----------------------------------------------------------
+        target_exposure = self._get_target_exposure(regime)
+        logger.info(
+            "PORTFOLIO Step 2: target_exposure=%.1f%% for %s",
+            target_exposure * 100, regime.value,
+        )
+
+        # ----------------------------------------------------------
+        # Step 3: Apply endgame constraints
+        # ----------------------------------------------------------
+        endgame_constraints = self.endgame.get_constraints()
+        target_exposure = min(target_exposure, endgame_constraints["max_exposure"])
+
+        if endgame_constraints["sell_all"]:
+            logger.critical(
+                "PORTFOLIO Step 3: ENDGAME SELL_ALL — %.1fh remaining",
+                endgame_constraints["hours_remaining"],
+            )
+            return self._force_liquidation(current_positions, nav)
+
+        logger.info(
+            "PORTFOLIO Step 3: endgame max_exposure=%.1f%%, effective=%.1f%%",
+            endgame_constraints["max_exposure"] * 100,
+            target_exposure * 100,
+        )
+
+        # ----------------------------------------------------------
+        # Step 4: Apply trend penalties to momentum scores
+        # ----------------------------------------------------------
+        adjusted_scores = self.trend_penalty.apply_penalties(momentum_scores)
+        logger.info(
+            "PORTFOLIO Step 4: trend penalties applied to %d scores",
+            len(adjusted_scores),
+        )
+
+        # ----------------------------------------------------------
+        # Step 5: Rank and select top N assets
+        # ----------------------------------------------------------
+        max_holdings = self._get_max_holdings(regime)
+        candidates = self._rank_and_select(adjusted_scores, max_holdings)
+        logger.info(
+            "PORTFOLIO Step 5: selected %d/%d candidates (max=%d)",
+            len(candidates), len(adjusted_scores), max_holdings,
+        )
+
+        # ----------------------------------------------------------
+        # Step 6: Apply volatility exclusion filter
+        # ----------------------------------------------------------
+        candidates_pre_filter = list(candidates)
+        candidates = self._apply_vol_filter(candidates, market_data)
+        filtered_out = len(candidates_pre_filter) - len(candidates)
+        if filtered_out > 0:
+            logger.info(
+                "PORTFOLIO Step 6: vol filter removed %d candidates", filtered_out
+            )
+
+        # ----------------------------------------------------------
+        # Step 7: Handle edge case — vol filter removed all candidates
+        # ----------------------------------------------------------
+        if not candidates and target_exposure > 0:
+            fallback_n = min(3, max_holdings) if max_holdings > 0 else 0
+            if fallback_n > 0:
+                candidates = self._rank_and_select(adjusted_scores, fallback_n)
+                logger.warning(
+                    "PORTFOLIO Step 7: VOL_FILTER removed all candidates, "
+                    "falling back to top %d by raw momentum",
+                    len(candidates),
+                )
+
+        # ----------------------------------------------------------
+        # Step 8: Size positions (inverse-vol with equal-weight fallback)
+        # ----------------------------------------------------------
+        crypto_weights = self._size_positions(
+            candidates, target_exposure, market_data
+        )
+        logger.info(
+            "PORTFOLIO Step 8: sized %d positions, total=%.1f%%",
+            len(crypto_weights), sum(crypto_weights.values()) * 100,
+        )
+
+        # ----------------------------------------------------------
+        # Step 9: Apply tier caps and redistribute excess
+        # ----------------------------------------------------------
+        crypto_weights = self._apply_tier_caps(crypto_weights)
+        logger.info(
+            "PORTFOLIO Step 9: tier caps applied, total=%.1f%%",
+            sum(crypto_weights.values()) * 100,
+        )
+
+        # ----------------------------------------------------------
+        # Step 10: Get meme pool allocations
+        # ----------------------------------------------------------
+        meme_weights = self._get_meme_allocations(momentum_scores, regime)
+        logger.info(
+            "PORTFOLIO Step 10: meme allocations=%d coins, total=%.1f%%",
+            len(meme_weights), sum(meme_weights.values()) * 100,
+        )
+
+        # ----------------------------------------------------------
+        # Step 11: Get PAXG target
+        # ----------------------------------------------------------
+        paxg_weight = self.paxg.get_target_weight(regime)
+        logger.info("PORTFOLIO Step 11: PAXG target=%.1f%%", paxg_weight * 100)
+
+        # ----------------------------------------------------------
+        # Step 12: Combine and validate total doesn't exceed 1.0
+        # ----------------------------------------------------------
+        target_weights = self._combine_weights(
+            crypto_weights, meme_weights, paxg_weight, target_exposure
+        )
+        logger.info(
+            "PORTFOLIO Step 12: combined total=%.1f%% (%d assets)",
+            sum(target_weights.values()) * 100, len(target_weights),
+        )
+
+        # ----------------------------------------------------------
+        # Step 13: Apply turnover constraint
+        # ----------------------------------------------------------
+        target_weights = self._apply_turnover_cap(
+            target_weights, current_positions
+        )
+        logger.info(
+            "PORTFOLIO Step 13: after turnover cap, total=%.1f%%",
+            sum(target_weights.values()) * 100,
+        )
+
+        # ----------------------------------------------------------
+        # Step 14: Suppress small trades
+        # ----------------------------------------------------------
+        target_weights = self._suppress_small_trades(
+            target_weights, current_positions, nav
+        )
+
+        # ----------------------------------------------------------
+        # Step 15: Compute orders
+        # ----------------------------------------------------------
+        orders = self._compute_orders(target_weights, current_positions, nav)
+
+        # Build metadata for logging and audit
+        metadata = {
+            "regime": regime.value,
+            "target_exposure": target_exposure,
+            "endgame_tier": endgame_constraints.get("tier", -1),
+            "endgame_hours_remaining": endgame_constraints.get("hours_remaining"),
+            "max_holdings": max_holdings,
+            "candidates_selected": len(candidates),
+            "vol_filtered_out": filtered_out,
+            "crypto_exposure": sum(
+                w for a, w in target_weights.items() if a != "PAXG"
+            ),
+            "paxg_weight": target_weights.get("PAXG", 0.0),
+            "meme_count": len(meme_weights),
+            "total_weight": sum(target_weights.values()),
+            "order_count": len(orders),
+        }
+        self._last_metadata = metadata
+
+        logger.info(
+            "PORTFOLIO COMPLETE: regime=%s exposure=%.1f%% holdings=%d "
+            "orders=%d total=%.1f%%",
+            regime.value,
+            metadata["crypto_exposure"] * 100,
+            len(target_weights),
+            len(orders),
+            metadata["total_weight"] * 100,
+        )
+
+        return ConstructionResult(
+            target_weights=target_weights,
+            orders=orders,
+            metadata=metadata,
+        )
+
+    # ==================================================================
+    # Private pipeline methods
+    # ==================================================================
+
+    def _get_target_exposure(self, regime: RegimeType) -> float:
+        """Determine crypto exposure fraction from current regime."""
+        regime_key = regime.value
+
+        # Check for rising-vol sub-regime within TREND_BULL
+        if regime == RegimeType.TREND_BULL:
+            btc_vol = self.regime_detector.state.btc_vol_percentile
+            if btc_vol > self._btc_vol_threshold:
+                regime_key = "TREND_BULL_RISING_VOL"
+
+        target = self._exposure_targets.get(regime_key, 0.55)
+        return min(target, self._max_crypto_exposure)
+
+    def _get_max_holdings(self, regime: RegimeType) -> int:
+        """Max number of crypto holdings for this regime."""
+        return self._holdings.get(regime.value, 6)
+
+    def _rank_and_select(
         self,
-        selected_assets: list[str],
+        scores: dict[str, float],
+        max_n: int,
+    ) -> list[str]:
+        """Rank assets by momentum score and select top N."""
+        if max_n <= 0:
+            return []
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [asset for asset, _ in ranked[:max_n]]
+
+    def _apply_vol_filter(
+        self,
+        candidates: list[str],
+        market_data: Any,
+    ) -> list[str]:
+        """Remove candidates whose 1h vol exceeds threshold × median."""
+        if not candidates or market_data is None:
+            return candidates
+
+        # Collect 1h vols for all candidates
+        vols: dict[str, float] = {}
+        for asset in candidates:
+            vol = None
+            if hasattr(market_data, "get_asset_volatility"):
+                vol = market_data.get_asset_volatility(asset, "1h")
+            if vol is not None and vol > 0:
+                vols[asset] = vol
+
+        if len(vols) < 2:
+            return candidates  # Not enough data to compute meaningful median
+
+        sorted_vols = sorted(vols.values())
+        median_vol = sorted_vols[len(sorted_vols) // 2]
+        threshold = median_vol * self._vol_filter_multiplier
+
+        filtered = [
+            asset for asset in candidates
+            if asset not in vols or vols[asset] <= threshold
+        ]
+        return filtered
+
+    def _size_positions(
+        self,
+        candidates: list[str],
         deployment: float,
-        asset_volatilities: dict[str, float],
+        market_data: Any = None,
     ) -> dict[str, float]:
-        """Compute volatility-adjusted weights (Phase 2+).
+        """Size positions using inverse-volatility weighting.
 
-        Higher vol = smaller position. Lower vol = larger position.
-        Normalizes so sum = deployment.
-
-        Args:
-            selected_assets: Assets selected by momentum signal.
-            deployment: Total crypto deployment fraction.
-            asset_volatilities: Map of asset -> 24h realized volatility.
-
-        Returns:
-            Dict of asset -> vol-adjusted weight.
+        Falls back to equal weight if volatility data is unavailable.
         """
-        if not selected_assets:
+        if not candidates or deployment <= 0:
             return {}
 
-        inv_vols: dict[str, float] = {}
-        for asset in selected_assets:
-            vol = asset_volatilities.get(asset, 0.0)
+        # Try inverse-vol sizing
+        vols: dict[str, float] = {}
+        if market_data is not None and hasattr(market_data, "get_asset_volatility"):
+            for asset in candidates:
+                vol = market_data.get_asset_volatility(asset, "24h")
+                if vol is not None and vol > 0:
+                    vols[asset] = vol
+
+        if len(vols) == len(candidates) and len(vols) > 0:
+            return self._inverse_vol_weights(candidates, deployment, vols)
+
+        # Equal-weight fallback
+        n = len(candidates)
+        base = deployment / n
+        return {asset: base for asset in candidates}
+
+    def _inverse_vol_weights(
+        self,
+        candidates: list[str],
+        deployment: float,
+        vols: dict[str, float],
+    ) -> dict[str, float]:
+        """Compute inverse-volatility weights normalized to deployment."""
+        inv_vols = {}
+        for asset in candidates:
+            vol = vols.get(asset, 0.01)
             if vol <= 0:
-                vol = 0.01  # floor to prevent division by zero
+                vol = 0.01
             inv_vols[asset] = 1.0 / vol
 
-        mean_inv_vol = sum(inv_vols.values()) / len(inv_vols)
-        if mean_inv_vol <= 0:
-            return self.compute_equal_weights(selected_assets, deployment)
+        total_inv = sum(inv_vols.values())
+        if total_inv <= 0:
+            n = len(candidates)
+            return {asset: deployment / n for asset in candidates}
 
-        base_weight = deployment / len(selected_assets)
-        weights: dict[str, float] = {}
-        for asset in selected_assets:
-            weights[asset] = base_weight * (inv_vols[asset] / mean_inv_vol)
+        return {
+            asset: (inv_vols[asset] / total_inv) * deployment
+            for asset in candidates
+        }
 
-        # Normalize to sum exactly to deployment
-        total = sum(weights.values())
-        if total > 0:
-            scale = deployment / total
-            weights = {a: w * scale for a, w in weights.items()}
+    def _apply_tier_caps(self, weights: dict[str, float]) -> dict[str, float]:
+        """Apply per-asset tier caps with iterative redistribution.
 
-        return weights
-
-    def apply_tier_caps(self, weights: dict[str, float]) -> dict[str, float]:
-        """Apply tier caps with iterative redistribution.
-
-        If a position exceeds its cap, the excess is distributed equally
-        among uncapped positions. Iterates up to max_iterations.
-
-        Args:
-            weights: Input weights.
-
-        Returns:
-            Capped weights (may not perfectly sum to deployment due to
-            multiple positions hitting caps).
+        Excess from capped positions is redistributed pro-rata to uncapped.
         """
         capped = dict(weights)
 
-        for iteration in range(self._max_redist_iter):
+        for _ in range(self._max_redist_iter):
             excess = 0.0
             capped_assets: set[str] = set()
 
@@ -310,86 +582,120 @@ class PortfolioConstructor:
             if excess <= 1e-8:
                 break
 
-            uncapped = [a for a in capped if a not in capped_assets and capped[a] > 0]
+            uncapped = [
+                a for a in capped
+                if a not in capped_assets and capped[a] > 0
+            ]
             if not uncapped:
                 break
 
-            add_each = excess / len(uncapped)
+            # Pro-rata redistribution
+            uncapped_total = sum(capped[a] for a in uncapped)
             for asset in uncapped:
-                capped[asset] += add_each
+                if uncapped_total > 0:
+                    share = capped[asset] / uncapped_total
+                    capped[asset] += excess * share
+                else:
+                    capped[asset] += excess / len(uncapped)
 
         return capped
 
-    def apply_ml_multipliers(
+    def _get_meme_allocations(
         self,
-        weights: dict[str, float],
-        ml_multipliers: dict[str, float],
-        deployment: float,
+        momentum_scores: dict[str, float],
+        regime: RegimeType,
     ) -> dict[str, float]:
-        """Apply ML sizing multipliers (Phase 3 only).
+        """Get meme pool allocations. Only active in configured regimes."""
+        allocations = self.meme_pool.rank_and_select(
+            momentum_scores, regime.value
+        )
+        return {a["symbol"]: a["weight"] for a in allocations}
 
-        Adjusts weights by multiplier, then re-normalizes to deployment.
-        Never applies to PAXG.
+    def _combine_weights(
+        self,
+        crypto_weights: dict[str, float],
+        meme_weights: dict[str, float],
+        paxg_weight: float,
+        target_exposure: float,
+    ) -> dict[str, float]:
+        """Combine crypto, meme, and PAXG weights enforcing total <= 1.0.
 
-        Args:
-            weights: Current weights.
-            ml_multipliers: Map of asset -> multiplier (0.5-1.3).
-            deployment: Target total deployment for re-normalization.
+        Meme allocations come FROM the crypto exposure budget.
+        PAXG comes from the cash buffer (does not count toward crypto).
 
-        Returns:
-            ML-adjusted weights.
+        Priority if over: reduce crypto first, then meme. PAXG last.
         """
-        adjusted = {}
-        for asset, weight in weights.items():
-            if asset == "PAXG":
-                adjusted[asset] = weight
-                continue
-            mult = ml_multipliers.get(asset, 1.0)
-            adjusted[asset] = weight * mult
+        combined: dict[str, float] = {}
 
-        # Re-normalize non-PAXG to sum to deployment
-        paxg_weight = adjusted.get("PAXG", 0.0)
-        non_paxg_total = sum(w for a, w in adjusted.items() if a != "PAXG")
-        if non_paxg_total > 0:
-            target_non_paxg = deployment
-            scale = target_non_paxg / non_paxg_total
-            for asset in adjusted:
-                if asset != "PAXG":
-                    adjusted[asset] *= scale
+        # Meme comes from crypto budget
+        meme_total = sum(meme_weights.values())
+        crypto_budget = max(0.0, target_exposure - meme_total)
 
-        return adjusted
+        # Scale crypto weights to fit within reduced budget
+        crypto_total = sum(crypto_weights.values())
+        if crypto_total > crypto_budget and crypto_total > 0:
+            scale = crypto_budget / crypto_total
+            crypto_weights = {a: w * scale for a, w in crypto_weights.items()}
 
-    # ------------------------------------------------------------------
-    # Step 4: Turnover constraint
-    # ------------------------------------------------------------------
+        # Merge crypto weights
+        for asset, weight in crypto_weights.items():
+            if weight > 1e-6:
+                combined[asset] = weight
 
-    def apply_turnover_constraint(
+        # Merge meme weights (no double-counting with crypto)
+        for asset, weight in meme_weights.items():
+            if weight > 1e-6:
+                combined[asset] = weight
+
+        # Add PAXG from cash buffer
+        if paxg_weight > 1e-6:
+            combined["PAXG"] = paxg_weight
+
+        # Final validation: total must not exceed 1.0
+        total = sum(combined.values())
+        if total > 1.0:
+            # Reduce crypto proportionally first
+            crypto_assets = [
+                a for a in combined
+                if a != "PAXG" and a not in meme_weights
+            ]
+            overshoot = total - 1.0
+
+            crypto_sum = sum(combined[a] for a in crypto_assets)
+            if crypto_sum >= overshoot:
+                scale = (crypto_sum - overshoot) / crypto_sum if crypto_sum > 0 else 0
+                for asset in crypto_assets:
+                    combined[asset] *= scale
+            else:
+                # Zero out crypto, then reduce meme
+                for asset in crypto_assets:
+                    combined[asset] = 0.0
+                remaining_overshoot = overshoot - crypto_sum
+                meme_assets = [a for a in combined if a in meme_weights]
+                meme_sum = sum(combined[a] for a in meme_assets)
+                if meme_sum > 0 and remaining_overshoot > 0:
+                    scale = max(0, (meme_sum - remaining_overshoot) / meme_sum)
+                    for asset in meme_assets:
+                        combined[asset] *= scale
+
+        # Remove zeroed entries
+        combined = {a: w for a, w in combined.items() if w > 1e-6}
+        return combined
+
+    def _apply_turnover_cap(
         self,
         target_weights: dict[str, float],
         current_weights: dict[str, float],
-        risk_exits: Optional[set[str]] = None,
     ) -> dict[str, float]:
-        """Enforce maximum turnover per rebalance.
+        """Enforce maximum one-way turnover per rebalance.
 
-        If one-way turnover exceeds max_turnover, scale down all weight
-        CHANGES proportionally. Risk exits bypass this constraint.
-
-        Args:
-            target_weights: Proposed target weights.
-            current_weights: Current portfolio weights.
-            risk_exits: Set of assets with risk-triggered exits (bypass turnover).
-
-        Returns:
-            Turnover-constrained weights.
+        If turnover exceeds max, scale down all weight changes proportionally.
         """
-        risk_exits = risk_exits or set()
         all_assets = set(target_weights.keys()) | set(current_weights.keys())
 
-        # Compute one-way turnover (excluding risk exits)
+        # Compute one-way turnover
         turnover = 0.0
         for asset in all_assets:
-            if asset in risk_exits:
-                continue
             target = target_weights.get(asset, 0.0)
             current = current_weights.get(asset, 0.0)
             turnover += abs(target - current)
@@ -405,213 +711,121 @@ class PortfolioConstructor:
         for asset in all_assets:
             current = current_weights.get(asset, 0.0)
             target = target_weights.get(asset, 0.0)
-
-            if asset in risk_exits:
-                constrained[asset] = target  # bypass
-            else:
-                change = target - current
-                constrained[asset] = current + change * scale
-
-        # Remove zero/negative weights
-        constrained = {a: w for a, w in constrained.items() if w > 1e-6}
+            change = target - current
+            constrained[asset] = current + change * scale
 
         logger.info(
-            "Turnover constrained: raw=%.2f%% -> capped=%.2f%%",
-            turnover * 100,
-            self._max_turnover * 100,
+            "TURNOVER constrained: raw=%.1f%% -> cap=%.1f%%",
+            turnover * 100, self._max_turnover * 100,
         )
 
-        return constrained
+        return {a: w for a, w in constrained.items() if w > 1e-6}
 
-    # ------------------------------------------------------------------
-    # Step 5: Minimum trade threshold
-    # ------------------------------------------------------------------
-
-    def apply_min_trade_threshold(
+    def _suppress_small_trades(
         self,
         target_weights: dict[str, float],
         current_weights: dict[str, float],
-        risk_exits: Optional[set[str]] = None,
+        nav: float,
     ) -> dict[str, float]:
-        """Suppress trades smaller than minimum threshold.
-
-        Risk exits always execute regardless of threshold.
-
-        Args:
-            target_weights: Proposed target weights.
-            current_weights: Current portfolio weights.
-            risk_exits: Assets with risk-triggered exits.
-
-        Returns:
-            Weights with sub-threshold changes suppressed.
-        """
-        risk_exits = risk_exits or set()
+        """Suppress trades smaller than minimum threshold."""
         result: dict[str, float] = {}
-
         all_assets = set(target_weights.keys()) | set(current_weights.keys())
+
         for asset in all_assets:
             target = target_weights.get(asset, 0.0)
             current = current_weights.get(asset, 0.0)
 
-            if asset in risk_exits:
-                result[asset] = target
-            elif abs(target - current) < self._min_trade:
-                result[asset] = current  # suppress
+            if abs(target - current) < self._min_trade:
+                result[asset] = current
             else:
                 result[asset] = target
 
         return {a: w for a, w in result.items() if w > 1e-6}
 
-    # ------------------------------------------------------------------
-    # Main compute entry point
-    # ------------------------------------------------------------------
-
-    def compute(
+    def _compute_orders(
         self,
-        regime: str,
-        btc_vol_percentile: float,
-        selected_assets: list[str],
+        target_weights: dict[str, float],
         current_weights: dict[str, float],
-        current_nav: float,
-        asset_volatilities: Optional[dict[str, float]] = None,
-        meme_selections: Optional[list[str]] = None,
-        tier5_selections: Optional[list[str]] = None,
-        ml_multipliers: Optional[dict[str, float]] = None,
-        risk_exits: Optional[set[str]] = None,
-        adaptive_adjustment: float = 0.0,
-        sizing_multiplier: float = 1.0,
-    ) -> tuple[dict[str, float], list[RiskEvent]]:
-        """Compute full target portfolio.
+        nav: float,
+    ) -> list[dict]:
+        """Compute order dicts from weight differences."""
+        orders: list[dict] = []
+        all_assets = set(target_weights.keys()) | set(current_weights.keys())
 
-        Main entry point called every rebalance cycle.
+        for asset in all_assets:
+            target = target_weights.get(asset, 0.0)
+            current = current_weights.get(asset, 0.0)
+            delta = target - current
 
-        Args:
-            regime: Current regime string from Layer 3.
-            btc_vol_percentile: BTC vol percentile from Layer 3.
-            selected_assets: Main pool assets selected by Layer 4 signals.
-            current_weights: Current portfolio weights.
-            current_nav: Current NAV in USD.
-            asset_volatilities: Asset -> 24h vol (Phase 2+, None = equal weight).
-            meme_selections: Meme pool selections (Phase 2+).
-            tier5_selections: Tier 5 pool selections (Phase 2+).
-            ml_multipliers: ML sizing multipliers (Phase 3).
-            risk_exits: Assets with pending risk exits.
-            adaptive_adjustment: Additional exposure from adaptive adjustment.
-            sizing_multiplier: From circuit breaker (1.0 = full, 0.5 = half).
+            if abs(delta) < 1e-6:
+                continue
 
-        Returns:
-            Tuple of (target_weights dict, list of RiskEvents).
-        """
-        events: list[RiskEvent] = []
+            orders.append({
+                "asset": asset,
+                "side": "BUY" if delta > 0 else "SELL",
+                "weight_change": delta,
+                "usd_amount": abs(delta * nav),
+                "target_weight": target,
+            })
 
-        # Step 1: Base deployment target
-        base_target = self.get_deployment_target(regime, btc_vol_percentile)
+        return orders
 
-        # Step 1b: Adaptive exposure adjustment (Phase 2+)
-        effective_target = min(base_target + adaptive_adjustment, self._max_exposure)
+    def _force_liquidation(
+        self,
+        current_positions: dict[str, float],
+        nav: float,
+    ) -> ConstructionResult:
+        """Return empty portfolio for endgame sell-all."""
+        orders = []
+        for asset, weight in current_positions.items():
+            if weight > 1e-6:
+                orders.append({
+                    "asset": asset,
+                    "side": "SELL",
+                    "weight_change": -weight,
+                    "usd_amount": weight * nav,
+                    "target_weight": 0.0,
+                })
 
-        # Step 1c: End-game de-risking
-        endgame_cap, endgame_stop, sell_all = self.get_endgame_cap()
-
-        if sell_all:
-            # Force sell everything
-            events.append(RiskEvent(
-                event_type=EventType.ENDGAME_SELL_ALL,
-                severity=Severity.CRITICAL,
-                triggered_value=0.0,
-                limit_value=0.0,
-                action_required="SELL ALL: final minutes of competition",
-            ))
-            return {}, events
-
-        if endgame_cap is not None:
-            effective_target = min(effective_target, endgame_cap)
-
-        # Apply circuit breaker sizing multiplier
-        final_deployment = effective_target * sizing_multiplier
-
-        # Step 3a: Pre-calculate sub-pool allocations so we don't overshoot deployment
-        meme_alloc = 0.0
-        tier5_alloc = 0.0
-        
-        if meme_selections:
-            for asset in meme_selections:
-                cap = self._get_cap(asset)
-                meme_alloc += min(0.03, cap)
-                
-        if tier5_selections:
-            for asset in tier5_selections:
-                cap = self._get_cap(asset)
-                tier5_alloc += min(0.015, cap)
-                
-        # The main pool gets whatever crypto deployment is left over
-        main_pool_deployment = max(0.0, final_deployment - meme_alloc - tier5_alloc)
-
-        # Step 3b: Per-asset weights for Main Pool
-        if asset_volatilities is not None and len(asset_volatilities) > 0:
-            weights = self.compute_vol_adjusted_weights(
-                selected_assets, main_pool_deployment, asset_volatilities,
-            )
-        else:
-            weights = self.compute_equal_weights(selected_assets, main_pool_deployment)
-
-        # Step 3c: Apply tier caps to Main Pool
-        weights = self.apply_tier_caps(weights)
-
-        # Step 3d: ML multipliers (Phase 3)
-        if ml_multipliers:
-            weights = self.apply_ml_multipliers(weights, ml_multipliers, main_pool_deployment)
-            weights = self.apply_tier_caps(weights)  # re-check caps
-
-        # Step 3e: Merge Meme and Tier 5 pools into target weights
-        if meme_selections:
-            for asset in meme_selections:
-                cap = self._get_cap(asset)
-                weights[asset] = min(0.03, cap)
-
-        if tier5_selections:
-            for asset in tier5_selections:
-                cap = self._get_cap(asset)
-                weights[asset] = min(0.015, cap)
-
-        # Step 2: PAXG (from cash buffer — Phase 2+ only)
-        if self._paxg_alloc:
-            paxg_weight = self.get_paxg_weight(regime)
-            if paxg_weight > 0:
-                weights["PAXG"] = paxg_weight
-
-        # Assets not selected get weight 0
-        for asset in current_weights:
-            if asset not in weights:
-                weights[asset] = 0.0
-
-        # Step 4: Turnover constraint
-        weights = self.apply_turnover_constraint(weights, current_weights, risk_exits)
-
-        # Step 5: Minimum trade threshold
-        weights = self.apply_min_trade_threshold(weights, current_weights, risk_exits)
-
-        # Remove any zero-weight entries (clean output)
-        target = {a: w for a, w in weights.items() if w > 1e-6}
-
-        logger.info(
-            "Portfolio computed: regime=%s deployment=%.2f%% "
-            "assets=%d total_weight=%.4f",
-            regime,
-            final_deployment * 100,
-            len(target),
-            sum(target.values()),
+        return ConstructionResult(
+            target_weights={},
+            orders=orders,
+            metadata={
+                "reason": "endgame_sell_all",
+                "regime": self.regime_detector.current_regime.value,
+                "liquidated_positions": len(orders),
+            },
         )
-
-        return target, events
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _get_cap(self, asset: str) -> float:
         """Look up tier cap for an asset."""
-        if asset in self._tier_caps:
-            return self._tier_caps[asset]
+        if asset in self._asset_cap_overrides:
+            return self._asset_cap_overrides[asset]
         tier = self._asset_tier_map.get(asset, "tier_1_2")
         return self._tier_cap_defaults.get(tier, 0.08)
+
+    # ==================================================================
+    # Explain (for judges and debugging)
+    # ==================================================================
+
+    def explain(self) -> str:
+        """Return a human-readable summary of the last construction."""
+        m = self._last_metadata
+        if not m:
+            return "No portfolio construction has been run yet."
+
+        return (
+            f"Portfolio Construction Summary\n"
+            f"{'=' * 40}\n"
+            f"Regime:              {m.get('regime', 'N/A')}\n"
+            f"Target Exposure:     {m.get('target_exposure', 0) * 100:.1f}%\n"
+            f"Crypto Exposure:     {m.get('crypto_exposure', 0) * 100:.1f}%\n"
+            f"PAXG Weight:         {m.get('paxg_weight', 0) * 100:.1f}%\n"
+            f"Holdings:            {m.get('candidates_selected', 0)}\n"
+            f"Meme Coins:          {m.get('meme_count', 0)}\n"
+            f"Vol-Filtered Out:    {m.get('vol_filtered_out', 0)}\n"
+            f"Endgame Tier:        {m.get('endgame_tier', -1)}\n"
+            f"Hours Remaining:     {m.get('endgame_hours_remaining', 'N/A')}\n"
+            f"Total Weight:        {m.get('total_weight', 0) * 100:.1f}%\n"
+            f"Orders:              {m.get('order_count', 0)}\n"
+        )

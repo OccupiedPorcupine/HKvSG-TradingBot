@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.regime.regime_state import RegimeState, RegimeType
 from src.signals.momentum import MomentumSignal
-from src.signals.meme_pool import MemePoolSignal
+from src.signals.meme_pool import MemePoolManager
 from src.signals.tier5_pool import Tier5PoolSignal
 from src.signals.ml_overlay import MLOverlay
 from src.signals.signal_output import SignalOutput
@@ -350,49 +350,61 @@ class TestTrendPenalty:
 
 
 # ---------------------------------------------------------------------------
-# MemePoolSignal tests
+# MemePoolManager tests
 # ---------------------------------------------------------------------------
 
+def _make_meme_config(enabled=True):
+    """Create a config dict for MemePoolManager."""
+    return {
+        "meme_pool": {
+            "enabled": enabled,
+            "symbols": list(TIER_4),
+            "max_allocation_per_coin": 0.03,
+            "top_n": 2,
+            "active_regimes": ["TREND_BULL"],
+            "trailing_stop_pct": 0.08,
+        }
+    }
+
+
 class TestMemePool:
-    def test_disabled_in_phase1(self):
-        signal = MemePoolSignal(make_config(), TIER_4)
+    def test_disabled_returns_empty(self):
+        mgr = MemePoolManager(_make_meme_config(enabled=False))
         scores = {"SHIB": 0.90, "PEPE": 0.85}
-        result = signal.generate(scores, bull_regime())
-        assert result == {}
+        result = mgr.rank_and_select(scores, "TREND_BULL")
+        assert result == []
 
     def test_enabled_selects_top_2(self):
-        signal = MemePoolSignal(make_config(), TIER_4)
-        signal.enable()
+        mgr = MemePoolManager(_make_meme_config())
         scores = {
             "SHIB": 0.90, "PEPE": 0.85, "FLOKI": 0.80,
             "WIF": 0.75, "BONK": 0.70,
         }
-        result = signal.generate(scores, bull_regime())
+        result = mgr.rank_and_select(scores, "TREND_BULL")
         assert len(result) == 2
-        assert "SHIB" in result
-        assert "PEPE" in result
+        symbols = {a["symbol"] for a in result}
+        assert "SHIB" in symbols
+        assert "PEPE" in symbols
 
     def test_empty_in_bear(self):
-        signal = MemePoolSignal(make_config(), TIER_4)
-        signal.enable()
+        mgr = MemePoolManager(_make_meme_config())
         scores = {"SHIB": 0.90, "PEPE": 0.85}
-        result = signal.generate(scores, bear_regime())
-        assert result == {}
+        result = mgr.rank_and_select(scores, "TREND_BEAR")
+        assert result == []
 
     def test_empty_in_crisis(self):
-        signal = MemePoolSignal(make_config(), TIER_4)
-        signal.enable()
+        mgr = MemePoolManager(_make_meme_config())
         scores = {"SHIB": 0.90}
-        result = signal.generate(scores, crisis_regime())
-        assert result == {}
+        result = mgr.rank_and_select(scores, "HIGH_VOL_CRISIS")
+        assert result == []
 
-    def test_only_tier4_eligible(self):
-        signal = MemePoolSignal(make_config(), TIER_4)
-        signal.enable()
+    def test_only_meme_symbols_eligible(self):
+        mgr = MemePoolManager(_make_meme_config())
         scores = {"BTC": 0.99, "SHIB": 0.50}
-        result = signal.generate(scores, bull_regime())
-        assert "BTC" not in result
-        assert "SHIB" in result
+        result = mgr.rank_and_select(scores, "TREND_BULL")
+        symbols = {a["symbol"] for a in result}
+        assert "BTC" not in symbols
+        assert "SHIB" in symbols
 
 
 # ---------------------------------------------------------------------------
