@@ -141,15 +141,6 @@ async def main():
                 sys.exit(1)
             await asyncio.sleep(2 ** _attempt)
 
-    # Force a price fetch to evaluate exact market value of any held crypto
-    await ingestion.fetch_prices()
-    initial_prices = {
-        config.pair_for(a): ingestion.get_latest_price(a)
-        for a in ingestion.get_all_assets()
-        if ingestion.get_latest_price(a) is not None
-    }
-    position_tracker.update_prices(initial_prices)
-
     # Force a price fetch so we can evaluate the exact market value of any held crypto
     await ingestion.fetch_prices()
     initial_prices = {
@@ -312,9 +303,8 @@ async def main():
 
         # --- Phase 2: Contagion Probe ---
         # Compute live contagion ratio from held positions (W-01/E-09/W-05).
-        held_assets = list(position_tracker.positions.keys())
         contagion_result = contagion_probe.compute(
-            held_assets=held_assets,
+            position_tracker.positions,
             get_return_fn=feature_engine.get_return,
         )
 
@@ -338,8 +328,8 @@ async def main():
             risk_events = risk_manager.tick(
                 current_prices=current_prices,
                 tracker=position_tracker,
-                contagion_ratio=contagion_ratio,
-                avg_loss=avg_loss,
+                contagion_ratio=contagion_result.contagion_ratio,
+                avg_loss=contagion_result.avg_loss,
                 daily_pnl_pct=daily_pnl_pct,
                 endgame_stop_override=endgame_stop_override,
             )
@@ -579,7 +569,7 @@ async def main():
             if _endgame_hours == float("inf"):
                 _endgame_hours = 0.0
         except Exception:
-            pass
+            logger.warning("Failed to fetch endgame constraints: %s", e)
 
         # W-03: write atomic status.json for external monitoring (was never called).
         try:
