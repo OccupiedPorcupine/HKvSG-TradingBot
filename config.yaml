@@ -471,11 +471,19 @@ logging:
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 # -----------------------------------------------------------------------------
+# PORTFOLIO BREAKDOWN — periodic debug log of current portfolio weights
+# Set enabled: false before competition
+# -----------------------------------------------------------------------------
+portfolio_breakdown:
+  enabled: true
+  cadence_sec: 60                       # log breakdown every 5 min
+
+# -----------------------------------------------------------------------------
 # DEBUG TICK — temporary price heartbeat logged every 60s
 # Set enabled: false before competition
 # -----------------------------------------------------------------------------
 debug_tick:
-  enabled: true
+  enabled: false
   watch_assets:          # any subset of the 67 tickers
     - BTC
     - ETH

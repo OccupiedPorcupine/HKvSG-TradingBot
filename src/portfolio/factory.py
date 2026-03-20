@@ -83,63 +83,35 @@ def build_tier_cap_defaults(config: Config) -> dict[str, float]:
 
 def create_portfolio_constructor(
     config: Config,
-    phase: int = 1,
+    regime_detector=None,
+    trend_penalty=None,
+    meme_pool=None,
+    endgame=None,
+    paxg=None,
+    risk_manager=None,
 ) -> PortfolioConstructor:
-    """Create a PortfolioConstructor from config.yaml.
+    """Create a PortfolioConstructor with all Phase 2 dependencies.
 
     Args:
         config: Loaded Config instance.
-        phase: Current implementation phase (1, 2, or 3).
+        regime_detector: RegimeDetector instance.
+        trend_penalty: TrendPenaltyEngine instance.
+        meme_pool: MemePoolManager instance.
+        endgame: EndgameManager instance.
+        paxg: PAXGAllocator instance.
+        risk_manager: RiskManager instance (optional).
 
     Returns:
         Configured PortfolioConstructor.
     """
-    regime_targets = config.get("portfolio.regime_targets", {})
-
-    # Parse competition end time
-    end_str = config.get("competition.competition_end_utc")
-    comp_end: Optional[datetime] = None
-    if end_str:
-        _parsed = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-        # SAFETY: if config string has no timezone suffix, fromisoformat returns a
-        # naive datetime; comparing naive vs aware raises TypeError at endgame check.
-        if _parsed.tzinfo is None:
-            _parsed = _parsed.replace(tzinfo=timezone.utc)
-        comp_end = _parsed
-
-    # Phase 1: simple T-1h sell-all, no full endgame schedule
-    endgame_schedule = None
-    final_sell_min = 60.0  # sell all at T-1h for Phase 1
-
-    if phase >= 2:
-        endgame_schedule = config.get("endgame.schedule", [])
-        final_sell_min = config.get("endgame.final_sell_minutes_remaining", 15.0)
-
-    # Phase 1: no PAXG allocation
-    paxg_allocation = None
-    if phase >= 2:
-        paxg_allocation = config.get("portfolio.paxg_allocation", {})
-
     return PortfolioConstructor(
-        regime_targets=regime_targets,
-        tier_caps=build_tier_cap_overrides(config),
-        asset_tier_map=build_asset_tier_map(config),
-        tier_cap_defaults=build_tier_cap_defaults(config),
-        btc_vol_high_vol_threshold=config.get(
-            "portfolio.btc_vol_high_vol_threshold", 70.0
-        ),
-        max_crypto_exposure=config.get("portfolio.max_crypto_exposure", 0.90),
-        max_turnover=config.get("portfolio.max_turnover_per_rebalance", 0.25),
-        min_trade_threshold=config.get(
-            "portfolio.min_trade_threshold_pct_nav", 0.002
-        ),
-        paxg_allocation=paxg_allocation,
-        endgame_schedule=endgame_schedule,
-        final_sell_minutes=final_sell_min,
-        competition_end_utc=comp_end,
-        redistribution_max_iterations=config.get(
-            "tier_caps.redistribution_max_iterations", 5
-        ),
+        config=config.raw if hasattr(config, 'raw') else config,
+        regime_detector=regime_detector,
+        trend_penalty=trend_penalty,
+        meme_pool=meme_pool,
+        endgame=endgame,
+        paxg=paxg,
+        risk_manager=risk_manager,
     )
 
 

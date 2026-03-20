@@ -1522,3 +1522,12 @@ As each completes:
 | Wave 4     | T9                | 30 min          |                                    |
 | Buffer     | Debug, fix        | 60 min          | Something WILL break at the seams  |
 | **Total**  |                   | **5–6.5 hours** | Plan for 8, be happy at 6          |
+
+feat(phase2): implement core logic for regime detection, risk, and signals
+Regime Detection (T1): Added asymmetric transitions, upgrade confirmation windows, and contagion probing with small-portfolio thresholds.
+Trend Penalty (T2): Implemented EMA-based trend filter to penalize assets during broad market downturns.
+Meme Pool (T3): Created MemePoolManager for Tier 4 sub-pool selection and allocation during bullish regimes.
+Dynamic Stops (T4): Enhanced TrailingStopManager with P&L-based tightening factors and endgame stop overrides.
+Portfolio & Endgame (T5/T6): Added EndgameManager for scheduled de-risking and PAXGAllocator for regime-conditional hedging.
+Validation & Utils: Introduced a validation layer for regime inputs and a comprehensive project tree manifest.
+Config & Planning: Updated config.yaml with Phase 2 parameters and integrated the parallel agent implementation plan.
