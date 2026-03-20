@@ -1,6 +1,15 @@
+import os
+import sys
 import logging
-from src.signals.momentum import MomentumSignal
+# from src.signals.momentum import MomentumSignal
 from unittest.mock import MagicMock
+
+# --- THE FIX: Tell Python to look in the parent directory for 'src' ---
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
+
+# Now the import will work!
+from src.signals.momentum import MomentumSignal
 
 logging.basicConfig(level=logging.INFO)
 

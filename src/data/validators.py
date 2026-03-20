@@ -175,8 +175,11 @@ class DataValidator:
 
         # Check single-bar return against volatility threshold
         bar_return = abs(new_price - prev_price) / prev_price
+        
+        # Absolute minimum threshold: don't flag moves smaller than 1% as anomalies
+        min_absolute_move = 0.01
 
-        if bar_return > self.anomaly_threshold_std * vol_1h:
+        if bar_return > max(self.anomaly_threshold_std * vol_1h, min_absolute_move):
             self._anomaly_flags[asset] = True
             self._statuses[asset] = AssetStatus.ANOMALY
             logger.warning(
@@ -185,7 +188,7 @@ class DataValidator:
                 asset,
                 bar_return,
                 vol_1h,
-                self.anomaly_threshold_std * vol_1h,
+                max(self.anomaly_threshold_std * vol_1h, min_absolute_move),
                 new_price,
                 prev_price,
             )

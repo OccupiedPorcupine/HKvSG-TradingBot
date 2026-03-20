@@ -1,4 +1,11 @@
+import sys
+import os
 import logging
+
+# --- THE FIX 1: Tell Python to look in the parent directory for 'src' ---
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
+
 from pathlib import Path
 from src.execution.position_tracker import PositionTracker, Position
 from src.risk.factory import create_risk_manager
