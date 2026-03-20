@@ -326,9 +326,10 @@ class PositionTracker:
         """
         # 1. Sync USD cash balance
         usd = balances.get("USD", {})
-        if "free" in usd:
+        if "free" in usd or "locked" in usd:
             old_cash = self.cash_balance
-            self.cash_balance = usd["free"]
+            # Sum both free and locked USD to get true cash balance
+            self.cash_balance = float(usd.get("free", 0.0)) + float(usd.get("locked", 0.0))
             if abs(old_cash - self.cash_balance) > 1.0:
                 logger.warning(
                     "Cash balance synced: $%.2f -> $%.2f (diff: $%.2f)",
