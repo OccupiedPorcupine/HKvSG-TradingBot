@@ -380,7 +380,9 @@ class ExecutionClient:
                 logger.info("Cancelled %d orders for %s", len(canceled), pair)
             return canceled
         except RoostooAPIError as e:
-            logger.warning("Cancel orders for %s failed: %s", pair, e)
+            # Silence the expected "no order canceled" warning
+            if "no order canceled" not in str(e).lower():
+                logger.warning("Cancel orders for %s failed: %s", pair, e)
             return []
 
     async def get_balance(self) -> dict[str, dict[str, float]]:
@@ -390,7 +392,7 @@ class ExecutionClient:
             Dict mapping currency to {"free": float, "locked": float}.
         """
         resp = await self.client.get_balance()
-        wallet = resp.get("Wallet", {})
+        wallet = resp.get("SpotWallet", {})
         balances: dict[str, dict[str, float]] = {}
         for currency, info in wallet.items():
             if isinstance(info, dict):

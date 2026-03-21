@@ -35,7 +35,6 @@ from src.execution.order_manager import OrderManager, OrderManagerConfig
 from src.orchestration.startup import run_preflight_checks, PreFlightCheckError
 from src.orchestration.scheduler import Scheduler
 from src.orchestration.safe_state import SystemState
-from src.orchestration.recovery import reconstruct_positions
 
 from src.adaptation.signal_health import SignalHealthMonitor, RebalanceOutcome
 from src.adaptation.performance_log import PerformanceLogger
@@ -122,32 +121,55 @@ async def main():
         log_path=config.get("logging.trade_log", "logs/trades.jsonl")
     )
 
-    # Starting capital: prefer InitialWallet from exchange (ground truth), fall back to config
-    starting_capital = config.get("competition.starting_capital_usd", 1_000_000)
-    if exec_client.initial_wallet_usd > 0:
-        starting_capital = exec_client.initial_wallet_usd
-        logger.info("Starting capital from exchange InitialWallet: $%.2f", starting_capital)
-    else:
-        logger.warning("InitialWallet not available from exchange; using config value $%.0f", starting_capital)
-
-    position_tracker = PositionTracker(starting_capital=starting_capital)
-
-    # Crash Recovery: Positions
-    if raw_config_dict.get("recovery_trade_log_exists"):
-        reconstruct_positions(position_tracker, Path(decision_logger.log_path))
-
-    # Data Ingestion & Features — prices from Binance, orders via Roostoo
+    # Initialize API Clients for Data
     binance_client = BinancePriceClient()
     ingestion = DataIngestionManager(config.raw, base_client, binance_client=binance_client)
-    await ingestion.initialize()  # Discovers universe, builds Binance symbol map, reloads Parquet
+    await ingestion.initialize()
+
+    # --- FRESH START LOGIC: Sync Balances and Calculate True Baseline NAV ---
+    logger.info("Fetching true exchange balances to establish fresh baseline NAV...")
+    position_tracker = PositionTracker(starting_capital=0.0)
+    
+    for _attempt in range(3):
+        try:
+            startup_balances = await exec_client.get_balance()
+            position_tracker.sync_from_exchange(startup_balances)
+            break
+        except Exception as e:
+            if _attempt == 2:
+                logger.critical("Failed to fetch startup balances: %s", e)
+                sys.exit(1)
+            await asyncio.sleep(2 ** _attempt)
+
+    # Force a price fetch so we can evaluate the exact market value of any held crypto
+    await ingestion.fetch_prices()
+    initial_prices = {
+        config.pair_for(a): ingestion.get_latest_price(a)
+        for a in ingestion.get_all_assets()
+        if ingestion.get_latest_price(a) is not None
+    }
+    position_tracker.update_prices(initial_prices)
+    
+    # Ground cost basis for existing assets
+    for asset, pos in position_tracker.positions.items():
+        if pos.cost_basis <= 0.0:
+            curr_price = ingestion.get_latest_price(asset)
+            if curr_price and curr_price > 0:
+                pos.cost_basis = curr_price
+                pos.peak_price_since_entry = curr_price
+    
+    # Establish the true baseline NAV for 0% daily profit/loss
+    starting_nav = position_tracker.nav
+    position_tracker.starting_capital = starting_nav
+    logger.info("Bot starting fresh. Initial Baseline NAV strictly set to: $%.2f", starting_nav)
     
     feature_engine = FeatureEngine(config.raw, ingestion)
     
     # Regime Detection
     regime_detector = RegimeDetector(config.raw)
     
-    # Risk Management — Phase 2: enables dynamic per-position stop tightening
-    risk_manager = create_risk_manager(config, starting_nav=position_tracker.nav, phase=2)
+    # Risk Management
+    risk_manager = create_risk_manager(config, starting_nav=starting_nav, phase=2)
     
     # Signal Generation
     tier_1_3 = set(config.get("universe.tier_1_majors", [])) | \
@@ -178,7 +200,7 @@ async def main():
     performance_logger = PerformanceLogger(
         log_path=config.get("logging.snapshots_log", "logs/snapshots.jsonl"),
         daily_returns_path=config.get("logging.daily_returns_log", "logs/daily_returns.jsonl"),
-        competition_start_nav=starting_capital,
+        competition_start_nav=starting_nav,
     )
     beta_monitor = BetaMonitor(
         target_bull_min=config.get("portfolio.beta_targeting.target_trend_bull_min", 0.40),
@@ -214,16 +236,6 @@ async def main():
         ),
         signal_health_monitor=signal_health_monitor,
     )
-
-    # 3a. Startup balance reconciliation — sync cash before scheduling any ticks.
-    # SAFETY: positions are reconstructed from logs; exchange balance is ground truth
-    # for cash. Without this sync, NAV calculation may be wrong from minute one.
-    try:
-        startup_balances = await exec_client.get_balance()
-        position_tracker.sync_from_exchange(startup_balances)
-        logger.info("Startup balance reconciliation complete.")
-    except Exception as e:
-        logger.warning("Startup balance reconciliation failed (non-fatal): %s", e)
 
     # 4. Job Definitions
 
@@ -291,18 +303,10 @@ async def main():
 
         # --- Phase 2: Contagion Probe ---
         # Compute live contagion ratio from held positions (W-01/E-09/W-05).
-        # FIX: pass positions dict (not list), use correct kwarg name.
-        contagion_ratio = 0.0
-        avg_loss = 0.0
-        try:
-            contagion_result = contagion_probe.compute(
-                held_positions=position_tracker.positions,
-                get_return_fn=feature_engine.get_return,
-            )
-            contagion_ratio = contagion_result.contagion_ratio
-            avg_loss = contagion_result.avg_loss
-        except Exception as _cg_err:
-            logger.error("CONTAGION_PROBE failed (non-fatal): %s. Using defaults.", _cg_err)
+        contagion_result = contagion_probe.compute(
+            position_tracker.positions,
+            get_return_fn=feature_engine.get_return,
+        )
 
         # E-08: compute actual daily P&L so the daily-loss circuit breaker fires.
         daily_pnl_pct = risk_manager.get_daily_pnl_pct(position_tracker.nav)
@@ -324,8 +328,8 @@ async def main():
             risk_events = risk_manager.tick(
                 current_prices=current_prices,
                 tracker=position_tracker,
-                contagion_ratio=contagion_ratio,
-                avg_loss=avg_loss,
+                contagion_ratio=contagion_result.contagion_ratio,
+                avg_loss=contagion_result.avg_loss,
                 daily_pnl_pct=daily_pnl_pct,
                 endgame_stop_override=endgame_stop_override,
             )
@@ -565,19 +569,18 @@ async def main():
             if _endgame_hours == float("inf"):
                 _endgame_hours = 0.0
         except Exception:
-            pass
+            logger.warning("Failed to fetch endgame constraints: %s", e)
 
         # W-03: write atomic status.json for external monitoring (was never called).
         try:
             _nav = position_tracker.nav
-            _comp_start = starting_capital
-            _start_nav_safe = _comp_start if _comp_start > 0 else 1.0
+            _start_nav_safe = starting_nav if starting_nav > 0 else 1.0
             write_status(
                 status_path=config.get("logging.status_file", "logs/status.json"),
                 regime=regime_detector.state.current_regime.value,
                 nav=_nav,
                 pnl_daily_pct=risk_manager.get_daily_pnl_pct(_nav) * 100,
-                pnl_total_pct=(_nav - _comp_start) / _start_nav_safe * 100,
+                pnl_total_pct=(_nav - starting_nav) / _start_nav_safe * 100,
                 drawdown_pct=performance_logger.nav_peak - _nav if performance_logger.nav_peak > _nav else 0.0,
                 crypto_exposure_pct=position_tracker.crypto_exposure * 100,
                 cash_pct=(1 - position_tracker.crypto_exposure) * 100,

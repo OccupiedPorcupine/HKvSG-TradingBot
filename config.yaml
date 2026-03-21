@@ -387,7 +387,7 @@ execution:
   order_timeout_sec: 60                  # 1-min fill timeout, then cancel+resubmit
   max_resubmissions: 3                   # max resubmit attempts per order
   risk_exit_acceleration_threshold: 0.02 # >2% adverse → escalate after 1 failed
-  max_simultaneous_orders: 15            # order queue limit
+  max_simultaneous_orders: 30            # order queue limit
   fill_check_delay_sec: 5               # query order status after 5s
 
 # -----------------------------------------------------------------------------

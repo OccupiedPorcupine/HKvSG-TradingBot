@@ -300,31 +300,72 @@ class PositionTracker:
         """Update all positions with latest prices and recalculate weights.
 
         Args:
-            prices: Dict mapping asset symbol to latest price.
+            prices: Dict mapping pair name (or asset) to latest price.
         """
-        nav = self.nav
+        # Note: We must update prices FIRST before calculating NAV
         for asset, pos in self.positions.items():
+            # Try exact match (e.g., "BTC")
             if asset in prices:
                 pos.update_price(prices[asset])
+            # Try pair match (e.g., "BTC/USD" or "BTCUSD")
+            elif f"{asset}/USD" in prices:
+                pos.update_price(prices[f"{asset}/USD"])
+            elif f"{asset}USD" in prices:
+                pos.update_price(prices[f"{asset}USD"])
+
+        # Recalculate NAV now that prices are updated
+        nav = self.nav
+        for pos in self.positions.values():
             pos.update_weight(nav)
 
     def sync_from_exchange(self, balances: dict[str, dict[str, float]]) -> None:
-        """Sync cash balance from exchange balance query.
+        """Sync cash balance and crypto positions from exchange balance query.
 
         Args:
             balances: Balance dict from ExecutionClient.get_balance().
         """
+        # 1. Sync USD cash balance
         usd = balances.get("USD", {})
-        if "free" in usd:
-            old = self.cash_balance
-            self.cash_balance = usd["free"]
-            if abs(old - self.cash_balance) > 1.0:
+        if "free" in usd or "locked" in usd:
+            old_cash = self.cash_balance
+            # Sum both free and locked USD to get true cash balance
+            self.cash_balance = float(usd.get("free", 0.0)) + float(usd.get("locked", 0.0))
+            if abs(old_cash - self.cash_balance) > 1.0:
                 logger.warning(
                     "Cash balance synced: $%.2f -> $%.2f (diff: $%.2f)",
-                    old,
+                    old_cash,
                     self.cash_balance,
-                    self.cash_balance - old,
+                    self.cash_balance - old_cash,
                 )
+
+        # 2. Sync crypto positions
+        for asset, info in balances.items():
+            if asset == "USD":
+                continue
+            
+            # Combine free and locked balance for total true quantity
+            total_qty = float(info.get("free", 0.0)) + float(info.get("locked", 0.0))
+            
+            # Filter out microscopic dust values
+            if total_qty > 1e-8:
+                if asset in self.positions:
+                    # Adjust if execution drifted from exchange truth
+                    old_qty = self.positions[asset].quantity
+                    if abs(old_qty - total_qty) > 1e-6:
+                        self.positions[asset].quantity = total_qty
+                else:
+                    # New position discovered (e.g., held before bot started)
+                    logger.info("Discovered position from exchange: %s %.6f", asset, total_qty)
+                    self.positions[asset] = Position(
+                        asset=asset,
+                        quantity=total_qty,
+                        cost_basis=0.0,      # Will rely on future updates or stay 0
+                        current_price=0.0,   # Will be populated on the next update_prices() tick
+                        peak_price_since_entry=0.0,
+                    )
+            elif asset in self.positions and total_qty <= 1e-8:
+                # Asset was sold manually on the exchange
+                del self.positions[asset]
 
     def snapshot(self) -> dict:
         """Generate a full portfolio snapshot for logging.

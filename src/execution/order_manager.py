@@ -208,6 +208,23 @@ class OrderManager:
         pair = pending.pair
         price = self._latest_prices.get(pair, 0.0)
 
+        # Aggressively unlock balances before fresh trades
+        # If this is a new order from the strategy (not a timeout resubmission),
+        # cancel any lingering exchange orders for this pair to free up locked capital.
+        resubmission_count = getattr(pending, "resubmission_count", 0)
+        if resubmission_count == 0:
+            canceled_ids = await self.exec_client.cancel_pair_orders(pair)
+            if canceled_ids:
+                logger.info("Cleared %d orphaned exchange orders for %s to unlock balance.", len(canceled_ids), pair)
+            
+            # Remove from internal tracking if we were monitoring them
+            to_remove = [
+                oid for oid, active in self.active_orders.items() 
+                if active.pending_order.pair == pair
+            ]
+            for oid in to_remove:
+                self.active_orders.pop(oid, None)
+
         if price <= 0:
             logger.error(
                 "No price available for %s. Cannot submit order.", pair
@@ -338,9 +355,22 @@ class OrderManager:
                 return None
 
         except Exception as e:
-            logger.error(
-                "Order submission failed for %s: %s", pending.asset, e
-            )
+            error_msg = str(e)
+            if "insufficient balance" in error_msg.lower():
+                logger.warning(
+                    "Order skipped for %s: Exchange balance locked (likely by external/zombie order).", pending.asset
+                )
+                self.decision_logger.log_order(
+                    asset=pending.asset,
+                    action="SUPPRESS",
+                    trigger=pending.trigger,
+                    suppressed=True,
+                    suppression_reason="EXCHANGE_BALANCE_LOCKED",
+                )
+            else:
+                logger.error(
+                    "Order submission failed for %s: %s", pending.asset, error_msg
+                )
             return None
 
     async def check_active_orders(self) -> list[OrderResult]:
