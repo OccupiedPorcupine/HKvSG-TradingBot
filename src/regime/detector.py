@@ -1,5 +1,5 @@
 """Layer 3 — Rule-based regime classification.
-
+regime
 Phase 1: Minimal vol guard only (BTC vol spike → defensive mode).
 Phase 2: Full four-state regime with asymmetric transitions.
 
@@ -331,7 +331,7 @@ class RegimeDetector:
             and btc_24h is not None
             and breadth is not None
             and btc_4h > 0
-            and btc_24h > 0
+            # and btc_24h > 0
             and breadth > self._breadth_bull
         ):
             return RegimeType.TREND_BULL
@@ -342,7 +342,7 @@ class RegimeDetector:
             and btc_24h is not None
             and breadth is not None
             and btc_4h < 0
-            and btc_24h < 0
+            # and btc_24h < 0
             and breadth < self._breadth_bear
         ):
             return RegimeType.TREND_BEAR
