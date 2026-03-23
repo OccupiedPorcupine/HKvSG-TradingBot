@@ -1,41 +1,30 @@
 # =============================================================================
 # APEX — Autonomous Portfolio Execution Agent
 # Configuration File v3.2
-#
-# ALL tunable strategy parameters live here. Never hardcode values in logic.
-# Every parameter change during competition must be a committed config change.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # COMPETITION
 # -----------------------------------------------------------------------------
 competition:
-  starting_capital_usd: 1_000_000     # spec value — re-confirm via exchangeInfo on competition day
-  competition_end_utc: "2026-04-01T00:00:00Z"   # MUST SET before launch (ISO 8601)
-  competition_start_utc: "2026-03-22T00:00:00Z"  # MUST SET before launch
+  starting_capital_usd: 1_000_000     
+  competition_end_utc: "2026-04-01T00:00:00Z"   
+  competition_start_utc: "2026-03-22T00:00:00Z"  
 
 # -----------------------------------------------------------------------------
-# API — spec defaults, re-confirm on competition day (see contingency-15Mar.md)
+# API
 # -----------------------------------------------------------------------------
 api:
-  base_url: "https://mock-api.roostoo.com"  # CONFIRMED
+  base_url: "https://mock-api.roostoo.com"  
   key_env_var: "ROOSTOO_API_KEY"
   secret_env_var: "ROOSTOO_API_SECRET"
-  rate_limit_calls_per_min: 30         # spec value — pre-competition empirical was 50/sec (see contingency)
-  rate_limit_reserve_headroom: 10      # reserve for orders + retries
-  batch_pricing_available: true        # CONFIRMED: /v3/ticker with no pair returns all tickers
-  limit_fills_immediately: true        # needs credential test on competition day
-  volume_data_available: true          # CONFIRMED: CoinTradeValue + UnitTradeValue fields
-  backoff_429_max_sec: 30              # exponential backoff ceiling
-  safe_mode_consecutive_429s: 5        # enter safe mode after N consecutive 429s
-
-  # Phase 0 confirmed API response field names:
-  #   exchangeInfo → { IsRunning, InitialWallet: {USD: N}, TradePairs: {pair: {Coin, CoinFullName, Unit, UnitFullName, CanTrade, PricePrecision, AmountPrecision, MiniOrder}} }
-  #   ticker → { Success, ErrMsg, ServerTime, Data: {pair: {MaxBid, MinAsk, LastPrice, Change, CoinTradeValue, UnitTradeValue}} }
-  #   serverTime → { ServerTime }
-  #   67 pairs on API, 54 in our universe, 13 extra available (AVAX, SOL, XRP, etc.)
-  #   Bid-ask spread ~$0.01 on BTC — effectively zero on mock exchange
-  #   Content-Type is text/plain (not application/json) — parse via text then json.loads
+  rate_limit_calls_per_min: 30         
+  rate_limit_reserve_headroom: 10      
+  batch_pricing_available: true        
+  limit_fills_immediately: true        
+  volume_data_available: true          
+  backoff_429_max_sec: 30              
+  safe_mode_consecutive_429s: 5        
 
 # -----------------------------------------------------------------------------
 # UNIVERSE — asset tier classification
@@ -116,164 +105,143 @@ tier_caps:
   tier_3: 0.06
   tier_4_meme: 0.03
   tier_5_obscure: 0.02
-  doge: 0.05          # Tier 1 but capped lower due to meme-tier volatility
-  trump: 0.02         # political event risk
-  paxg: 0.15          # Treynor instrument
-  redistribution_max_iterations: 5  # cap-and-redistribute loop limit
+  doge: 0.05          
+  trump: 0.02         
+  paxg: 0.15          
+  redistribution_max_iterations: 5  
 
 # -----------------------------------------------------------------------------
 # DATA INGESTION (Layer 1)
 # -----------------------------------------------------------------------------
 data_ingestion:
-  price_cadence_sec: 60                # batch price fetch every 60s
-  balance_cadence_sec: 300             # balance check every 5 min + after trades
-  ring_buffer_maxlen: 1440             # 24h of 1-min bars per asset
-  missing_bar_fill_forward_limit: 3    # fill forward up to 3 bars, then STALE
-  price_anomaly_threshold_std: 5.0     # flag if single-bar return > 5σ of 1h vol
-  stale_data_max_age_sec: 300          # no new trades on data older than 5 min
-  heartbeat_stale_threshold_sec: 180   # alert if heartbeat > 3 min old
+  price_cadence_sec: 60                
+  balance_cadence_sec: 300             
+  ring_buffer_maxlen: 1440             
+  missing_bar_fill_forward_limit: 3    
+  price_anomaly_threshold_std: 5.0     
+  stale_data_max_age_sec: 300          
+  heartbeat_stale_threshold_sec: 180   
 
 # -----------------------------------------------------------------------------
 # FEATURE ENGINEERING (Layer 2)
 # -----------------------------------------------------------------------------
 features:
-  computation_timeout_sec: 5           # must complete within 5s of bar close
+  computation_timeout_sec: 5           
 
-  # return windows (in 1-min bars)
   return_windows:
-    - 5       # 5 min
-    - 15      # 15 min
-    - 60      # 1h
-    - 240     # 4h
-    - 720     # 12h
-    - 1440    # 24h
+    - 5       
+    - 15      
+    - 60      
+    - 240     
+    - 720     
+    - 1440    
 
-  # EMA periods (in 1-min bars)
   ema_periods:
     fast: 20
     medium: 50
-    trend_fast: 15     # EMA(60) for trend filter
-    trend_slow: 60    # EMA(240) for trend filter
+    trend_fast: 15     
+    trend_slow: 60    
 
-  # cross-sectional momentum composite weights (must sum to 1.0)
+  # UPDATED: Aggressive 1h/4h Momentum weights as per your strategy
   momentum_composite_weights:
-    rank_1h: 0.20
-    rank_4h: 0.40
-    rank_12h: 0.25
-    rank_24h: 0.15
+    rank_1h: 0.70
+    rank_4h: 0.20
+    rank_12h: 0.10
+    rank_24h: 0.00
 
-  # volatility windows
   volatility_windows:
-    - 60      # 1h
-    - 240     # 4h
-    - 1440    # 24h
+    - 60      
+    - 240     
+    - 1440    
 
-  # BTC vol percentile
   btc_vol_percentile_lookback_days: 7
   btc_vol_percentile_sample_interval_min: 5
-
-  # ML feature normalization (Phase 3 only)
   ml_zscore_lookback: 100
 
 # -----------------------------------------------------------------------------
 # REGIME DETECTION (Layer 3) # obsolete, replaced with phase 2
 # -----------------------------------------------------------------------------
 regime:
-  update_cadence_sec: 300              # regime classification every 5 min
+  update_cadence_sec: 300              
 
-  # classification thresholds
   thresholds:
-    contagion_ratio_crisis: 0.80       # > 80% positions down
-    contagion_avg_loss_pct: 0.01       # AND avg 5-min loss > 1%
-    btc_vol_percentile_crisis: 90      # BTC vol > 90th percentile → CRISIS
-    altcoin_breadth_bull: 0.55         # breadth > 55% → BULL component
-    altcoin_breadth_bear: 0.40         # breadth < 40% → BEAR component
+    contagion_ratio_crisis: 0.80       
+    contagion_avg_loss_pct: 0.01       
+    btc_vol_percentile_crisis: 90      
+    altcoin_breadth_bull: 0.55         
+    altcoin_breadth_bear: 0.40         
 
-  # transition rules
   transitions:
-    upgrade_confirmation_bars: 30      # 30 min of sustained upgrade signal
-    crisis_exit_contagion_below: 0.50  # contagion must drop below 50%
-    crisis_exit_vol_below: 70          # BTC vol percentile must drop below 70
-    crisis_exit_confirmation_bars: 30  # 30 min sustained before exiting CRISIS
+    upgrade_confirmation_bars: 30      
+    crisis_exit_contagion_below: 0.50  
+    crisis_exit_vol_below: 70          
+    crisis_exit_confirmation_bars: 30  
 
-  # contagion proxy
-  contagion_return_window_min: 5       # 5-min return window for held positions
+  contagion_return_window_min: 5       
 
 # -----------------------------------------------------------------------------
 # SIGNAL GENERATION (Layer 4)
 # -----------------------------------------------------------------------------
 signals:
-  # momentum top-N selections by regime
   top_n_selections:
     trend_bull: 10
     mean_revert: 6
     trend_bear: 4
     crisis: 0
 
-  # turnover buffer (Hysteresis N+3)
   hysteresis_buffer: 3
 
-  # volatility exclusion filter (Phase 1)
-  vol_exclusion_multiplier: 2.0
+  # UPDATED: Relaxed volatility blockade from 2.0 to 5.0
+  vol_exclusion_multiplier: 5.0
 
-  # sentiment overlay (Binance Funding)
   sentiment_overlay_enabled: true
   sentiment_crowded_penalty: -0.15
   sentiment_reversal_bonus: 0.10
 
-  # trend penalty (Phase 2+)
-  trend_penalty_magnitude: -0.30       # in cross-sectional rank std deviations
+  trend_penalty_magnitude: -0.30       
 
-  # meme pool (Phase 2+)
   meme_pool:
-    allocation_pct: 0.03               # 3% NAV per selected meme coin
-    max_selections: 2                  # top 1-2 meme coins
-    trailing_stop_pct: 0.08            # 8% trailing stop
+    allocation_pct: 0.03               
+    max_selections: 2                  
+    trailing_stop_pct: 0.12            # UPDATED to 12%
     active_regimes:
       - TREND_BULL
 
-  # Tier 5 opportunistic pool (Phase 2+)
   tier5_pool:
-    activation_4h_return_threshold: 0.10  # 4h return > 10% required
-    activation_rank_top_n: 3              # must be in top 3 of Tier 5
-    allocation_pct_min: 0.01              # 1% NAV min
-    allocation_pct_max: 0.02              # 2% NAV max
-    max_selections: 2                     # top 1-2 qualifying assets
-    trailing_stop_pct: 0.08              # 8% trailing stop
+    activation_4h_return_threshold: 0.10  
+    activation_rank_top_n: 3              
+    allocation_pct_min: 0.01              
+    allocation_pct_max: 0.02              
+    max_selections: 2                     
+    trailing_stop_pct: 0.12               # UPDATED to 12%
     active_regimes:
       - TREND_BULL
 
-  # ML overlay (Phase 3 only)
   ml:
     enabled: false
-    multiplier_high: 1.3                  # P > threshold_high → 1.3x
-    multiplier_low: 0.5                   # P < threshold_low → 0.5x
-    multiplier_default: 1.0               # otherwise → 1.0x
+    multiplier_high: 1.3                  
+    multiplier_low: 0.5                   
+    multiplier_default: 1.0               
     probability_threshold_high: 0.65
     probability_threshold_low: 0.45
-    ic_halt_threshold: 0.02               # halt if rolling 48h IC < 0.02
-    ic_resume_threshold: 0.04             # resume when IC > 0.04
-    ic_resume_window_hr: 12               # for 12 continuous hours
+    ic_halt_threshold: 0.02               
+    ic_resume_threshold: 0.04             
+    ic_resume_window_hr: 12               
 
 # -----------------------------------------------------------------------------
-# PORTFOLIO CONSTRUCTION (Layer 5) --> Overwritten by Phase2, this part is now obsolete
+# PORTFOLIO CONSTRUCTION (Layer 5) --> Overwritten by Phase2
 # -----------------------------------------------------------------------------
 portfolio:
-  # regime-conditional deployment targets (fraction of NAV in crypto)
   regime_targets:
-    trend_bull_low_vol: 0.80             # 75-85%, default midpoint
-    trend_bull_high_vol: 0.65            # 60-70%, default midpoint
-    mean_revert: 0.55                    # 50-60%, default midpoint
-    trend_bear: 0.35                     # 30-40%, default midpoint
-    crisis: 0.15                         # 10-20%, default midpoint
+    trend_bull_low_vol: 0.80             
+    trend_bull_high_vol: 0.65            
+    mean_revert: 0.55                    
+    trend_bear: 0.35                     
+    crisis: 0.15                         
 
-  # BTC vol percentile threshold separating low_vol and high_vol within BULL
   btc_vol_high_vol_threshold: 70
-
-  # hard cap on total crypto exposure (never exceeded, even with adaptive adj)
   max_crypto_exposure: 0.90
 
-  # PAXG allocation (from cash buffer, by regime)
   paxg_allocation:
     trend_bull: 0.05
     mean_revert: 0.10
@@ -281,131 +249,112 @@ portfolio:
     crisis: 0.15
     hard_cap: 0.15
 
-  # adaptive exposure adjustment (Phase 2+)
   adaptive_exposure:
-    enabled: false                       # enable in Phase 2
-    naive_benchmark_exposure: 0.70       # equal-weight 70% to all assets
-    gap_threshold_small: 0.02            # 2% behind → +10% floor
-    gap_threshold_large: 0.04            # 4% behind → +20% floor
+    enabled: false                       
+    naive_benchmark_exposure: 0.70       
+    gap_threshold_small: 0.02            
+    gap_threshold_large: 0.04            
     adjustment_small: 0.10
     adjustment_large: 0.20
-    min_days_remaining_small: 5          # only adjust if >5 days left
-    min_days_remaining_large: 3          # only adjust if >3 days left
+    min_days_remaining_small: 5          
+    min_days_remaining_large: 3          
 
-  # BTC beta targeting (Phase 2+)
   beta_targeting:
-    enabled: false                       # enable in Phase 2
+    enabled: false                       
     target_trend_bull_min: 0.40
     target_trend_bull_max: 0.60
     target_other_max: 0.30
-    adjustment_trigger_above: 0.10       # adjust if beta exceeds target by > 0.1
+    adjustment_trigger_above: 0.10       
     regression_window_days: 7
     benchmarks:
       - "BTC"
       - "equal_weighted"
 
-  # turnover constraint
-  max_turnover_per_rebalance: 0.25       # 25% one-way
-
-  # minimum trade threshold
-  min_trade_threshold_pct_nav: 0.002     # 0.2% of NAV = $2,000 at start
-
-  # rebalance cadence
-  rebalance_cadence_sec: 3600          # C-03: corrected from 120 (2 min) to avoid commission drag
+  max_turnover_per_rebalance: 0.25       
+  min_trade_threshold_pct_nav: 0.002     
+  rebalance_cadence_sec: 3600          
 
 # -----------------------------------------------------------------------------
 # END-GAME DE-RISKING (Layer 5, hardcoded schedule)
 # -----------------------------------------------------------------------------
 endgame:
-  # each entry: hours remaining → max crypto exposure cap
   schedule:
     - hours_remaining: 48
       max_exposure: 0.70
-      stop_override: null                # no stop tightening yet
+      stop_override: null                
     - hours_remaining: 24
       max_exposure: 0.45
       stop_override: null
     - hours_remaining: 12
       max_exposure: 0.25
-      stop_override: 0.03               # tighten all stops to 3%
+      stop_override: 0.03               
     - hours_remaining: 4
       max_exposure: 0.15
-      stop_override: 0.02               # tighten all stops to 2%
+      stop_override: 0.02               
     - hours_remaining: 1
       max_exposure: 0.15
       stop_override: 0.02
-  # final forced sell
-  final_sell_minutes_remaining: 15       # sell ALL at T-15min
+  final_sell_minutes_remaining: 15       
 
 # -----------------------------------------------------------------------------
 # RISK MANAGEMENT (Layer 6)
 # -----------------------------------------------------------------------------
 risk:
-  # portfolio-level hard limits
   portfolio_limits:
-    drawdown_soft_warning: 0.05          # 5% drawdown → log warning
-    drawdown_hard_halt: 0.08             # 8% drawdown → HALT new entries
-    daily_loss_soft_warning: 0.03        # 3% daily loss → log warning
-    daily_loss_hard_reduce: 0.05         # 5% daily loss → reduce to 50%
+    drawdown_soft_warning: 0.05          
+    drawdown_hard_halt: 0.08             
+    daily_loss_soft_warning: 0.03        
+    daily_loss_hard_reduce: 0.05         
     crypto_exposure_soft_warning: 0.85
     crypto_exposure_hard_sell: 0.90
-    single_asset_loss_soft: 0.04         # 4% loss from entry → warning
-    single_asset_loss_hard: 0.06         # 6% loss from entry → close
+    single_asset_loss_soft: 0.04         
+    single_asset_loss_hard: 0.06         
 
-  # trailing stops (base distances)
+  # UPDATED: 12% Trailing Stops across the board
   trailing_stops:
-    tier_1_3: 0.06                       # 6% below peak
-    tier_4_5: 0.08                       # 8% below peak (meme + obscure)
-    trump: 0.10                          # 10% below peak
-    minimum_floor: 0.02                  # NEVER below 2%, even with tightening
+    tier_1_3: 0.12                       
+    tier_4_5: 0.12                       
+    trump: 0.10                          
+    minimum_floor: 0.02                  
 
-  # dynamic trailing stop tightening (based on daily P&L)
   stop_tightening:
-    # daily P&L > +2% → tighten stops by 40%
     threshold_high_pnl: 0.02
     tightening_high: 0.40
-    # daily P&L +1% to +2% → tighten by 20%
     threshold_medium_pnl: 0.01
     tightening_medium: 0.20
-    # daily P&L < +1% → normal stops
-    # daily P&L < -0.5% → circuit breakers handle it
 
-  # drawdown recovery
   drawdown_recovery:
-    halt_cooldown_hr: 2                  # no new buys for 2 hours
-    resume_sizing_fraction: 0.50         # resume at 50% size
-    full_sizing_within_pct_of_peak: 0.04 # full size when within 4% of peak
+    halt_cooldown_hr: 2                  
+    resume_sizing_fraction: 0.50         
+    full_sizing_within_pct_of_peak: 0.04 
 
-  # contagion circuit breaker
   contagion:
     ratio_threshold: 0.80
     avg_loss_threshold_pct: 0.01
-    position_reduction_to: 0.20          # reduce all positions to 20% of size
+    position_reduction_to: 0.20          
 
-  # risk check cadence
-  check_cadence_sec: 60                  # every 1 minute
+  check_cadence_sec: 60                  
 
 # -----------------------------------------------------------------------------
 # EXECUTION ENGINE (Layer 7)
 # -----------------------------------------------------------------------------
 execution:
-  order_timeout_sec: 60                  # 1-min fill timeout, then cancel+resubmit
-  max_resubmissions: 3                   # max resubmit attempts per order
-  risk_exit_acceleration_threshold: 0.02 # >2% adverse → escalate after 1 failed
-  max_simultaneous_orders: 30            # order queue limit
-  fill_check_delay_sec: 5               # query order status after 5s
+  order_timeout_sec: 60                  
+  max_resubmissions: 3                   
+  risk_exit_acceleration_threshold: 0.02 
+  max_simultaneous_orders: 30            
+  fill_check_delay_sec: 5               
 
 # -----------------------------------------------------------------------------
 # ADAPTATION & MONITORING (Layer 8)
 # -----------------------------------------------------------------------------
 adaptation:
-  # signal health monitoring
   signal_health:
     check_cadence_hr: 1
     hit_rate_window_hr: 24
     hit_rate_warning: 0.45
     hit_rate_halt: 0.35
-    hit_rate_halt_sustained_hr: 12       # must be below for 12h to halt
+    hit_rate_halt_sustained_hr: 12       
     halted_exposure_cap: 0.30
     halted_keep_top_positions: 3
     resume_hit_rate: 0.50
@@ -413,24 +362,20 @@ adaptation:
     winner_loser_warning: 0.80
     winner_loser_halt: 0.50
 
-  # signal decay monitoring (informational)
   signal_decay:
-    high_decay_difference_threshold: 0.05  # 30-min corr > 60-min by 0.05
+    high_decay_difference_threshold: 0.05  
 
-  # performance snapshots
   performance_snapshot_cadence_hr: 1
-
-  # crash recovery parquet backup
   parquet_backup_cadence_hr: 1
 
 # -----------------------------------------------------------------------------
 # ML RETRAINING (Layer 8, Phase 3 only)
 # -----------------------------------------------------------------------------
 ml_retrain:
-  enabled: false                         # enable in Phase 3
-  cadence_hr: 24                         # retrain every 24h
-  training_lookback_days: 60             # 60+ days of historical data
-  target: "sign_4h_return"               # binary classification target
+  enabled: false                         
+  cadence_hr: 24                         
+  training_lookback_days: 60             
+  target: "sign_4h_return"               
   hyperparameters:
     max_depth: 6
     min_child_samples: 50
@@ -438,8 +383,8 @@ ml_retrain:
     n_estimators: 500
     early_stopping_rounds: 50
   sanity_check:
-    data_window_min: 5                   # run new model on last 5 min of data
-    std_threshold: 2.0                   # reject if distribution differs >2σ
+    data_window_min: 5                   
+    std_threshold: 2.0                   
   historical_data_path: "data/historical_ohlcv.parquet"
   model_save_path: "models/lightgbm_latest.pkl"
 
@@ -447,19 +392,19 @@ ml_retrain:
 # PHASE 1 — MINIMAL VOL GUARD (used before Phase 2 regime detection)
 # -----------------------------------------------------------------------------
 phase1_vol_guard:
-  btc_30d_median_vol: 0.0              # MUST SET — compute from Binance history
-  vol_spike_multiplier: 2.0             # if BTC 24h vol > 2× median → defensive
-  defensive_max_exposure: 0.40          # cap at 40% in defensive mode
-  normal_max_exposure: 0.75             # 75% in normal mode
+  btc_30d_median_vol: 0.0              
+  vol_spike_multiplier: 2.0             
+  defensive_max_exposure: 0.40          
+  normal_max_exposure: 0.75             
 
 # -----------------------------------------------------------------------------
 # ORCHESTRATION
 # -----------------------------------------------------------------------------
 orchestration:
-  data_ingestion_timeout_sec: 10         # ingestion + features must finish in 10s
-  minimum_activity_check_hr: 24          # force trade if none in 24h
-  job_overlap_warning: true              # log JOB_OVERLAP if job still running
-  max_consecutive_failures: 3            # enter global safe state after 3 failures
+  data_ingestion_timeout_sec: 10         
+  minimum_activity_check_hr: 24          
+  job_overlap_warning: true              
+  max_consecutive_failures: 3            
 
 # -----------------------------------------------------------------------------
 # LOGGING
@@ -470,26 +415,24 @@ logging:
   main_log: "logs/apex.log"
   trade_log: "logs/trades.jsonl"
   snapshot_log: "logs/snapshots.jsonl"
-  snapshots_log: "logs/snapshots.jsonl"          # C-02: code accesses snapshots_log (trailing s); keep both for compat
-  daily_returns_log: "logs/daily_returns.jsonl"  # C-01: required by PerformanceLogger; was missing
+  snapshots_log: "logs/snapshots.jsonl"          
+  daily_returns_log: "logs/daily_returns.jsonl"  
   heartbeat_file: "logs/heartbeat"
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 # -----------------------------------------------------------------------------
 # PORTFOLIO BREAKDOWN — periodic debug log of current portfolio weights
-# Set enabled: false before competition
 # -----------------------------------------------------------------------------
 portfolio_breakdown:
   enabled: true
-  cadence_sec: 60                       # log breakdown every 5 min
+  cadence_sec: 60                       
 
 # -----------------------------------------------------------------------------
 # DEBUG TICK — temporary price heartbeat logged every 60s
-# Set enabled: false before competition
 # -----------------------------------------------------------------------------
 debug_tick:
   enabled: false
-  watch_assets:          # any subset of the 67 tickers
+  watch_assets:          
     - BTC
     - ETH
     - SOL
@@ -516,22 +459,22 @@ random_seeds:
 
 regime:
   btc_symbol: "BTC"
-  breadth_bull_threshold: 0.35         # fraction of altcoins positive (4h) # Changed from 0.55. Now only 35% of coins need to be pumping!
-  breadth_bear_threshold: 0.25         # Changed from 0.40
+  breadth_bull_threshold: 0.35         
+  breadth_bear_threshold: 0.25         
   contagion_ratio_threshold: 0.80
-  contagion_loss_threshold: 0.01       # 1% avg 5min loss
+  contagion_loss_threshold: 0.01       
   contagion_small_portfolio_size: 6
   contagion_small_ratio_threshold: 0.90
   contagion_small_loss_threshold: 0.015
   btc_vol_crisis_percentile: 90
-  upgrade_persistence_minutes: 5      # Update for faster response
-  crisis_exit_persistence_minutes: 5  # Update for faster crisis response and exit
+  upgrade_persistence_minutes: 5      
+  crisis_exit_persistence_minutes: 5  
 
 trend_penalty:
-  ema_short_period: 15                 # minutes # changed from 60
-  ema_long_period: 60                  # Changed from 240
+  ema_short_period: 15                 
+  ema_long_period: 60                  
   penalty_sigma: -0.3
-  broad_downturn_threshold: 0.70       # fraction of universe with bearish EMA
+  broad_downturn_threshold: 0.70       
   broad_downturn_penalty_sigma: -0.15
 
 meme_pool:
@@ -540,23 +483,23 @@ meme_pool:
   max_allocation_per_coin: 0.03
   top_n: 2
   active_regimes: ["TREND_BULL"]
-  trailing_stop_pct: 0.08
+  trailing_stop_pct: 0.12              # UPDATED to 12%
 
 dynamic_stops:
-  tighten_high_threshold: 0.05         # unrealized PnL above this: heavy tighten
-  tighten_high_factor: 0.60            # multiply base stop by this (40% tighter)
-  tighten_mid_threshold: 0.025         # unrealized PnL above this: moderate tighten
-  tighten_mid_factor: 0.80             # multiply base stop by this (20% tighter)
-  min_stop_floor: 0.02                 # absolute minimum stop: 2%
+  tighten_high_threshold: 0.05         
+  tighten_high_factor: 0.60            
+  tighten_mid_threshold: 0.025         
+  tighten_mid_factor: 0.80             
+  min_stop_floor: 0.02                 
 
 paxg:
   symbol: "PAXG"
   allocation:
-    TREND_BULL: 0.04                   # midpoint of [0.03, 0.05]
-    MEAN_REVERT: 0.075                 # midpoint of [0.05, 0.10]
-    TREND_BEAR: 0.125                  # midpoint of [0.10, 0.15]
-    HIGH_VOL_CRISIS: 0.125             # midpoint of [0.10, 0.15]
-  rebalance_tolerance: 0.01            # don't rebalance if within 1% of target
+    TREND_BULL: 0.04                   
+    MEAN_REVERT: 0.075                 
+    TREND_BEAR: 0.125                  
+    HIGH_VOL_CRISIS: 0.125             
+  rebalance_tolerance: 0.01            
 
 endgame:
   schedule:
@@ -570,9 +513,9 @@ endgame:
 
 portfolio:
   exposure:
-    TREND_BULL: 0.80                   # midpoints, not ranges
-    TREND_BULL_RISING_VOL: 0.65
-    MEAN_REVERT: 0.55
+    TREND_BULL: 1.00                   
+    TREND_BULL_RISING_VOL: 0.85
+    MEAN_REVERT: 0.75
     TREND_BEAR: 0.35
     HIGH_VOL_CRISIS: 0.15
   holdings:
@@ -580,16 +523,15 @@ portfolio:
     MEAN_REVERT: 20
     TREND_BEAR: 10
     HIGH_VOL_CRISIS: 0
-  turnover_max_pct: 1.00 # changed from 0.25
+  turnover_max_pct: 1.00 
   min_trade_nav_pct: 0.002
-  rebalance_cadence_sec: 300 # add rebalance configuration for faster trades
+  rebalance_cadence_sec: 300 
   tier_caps:
-    tier1: 0.50           # Modified for prioritization
+    tier1: 0.50           
     tier1_doge: 0.05
-    tier2: 0.15           # Modified for prioritization
-    tier3: 0.05           # Modified for prioritization
-    tier4_meme: 0.01      # Modified to limit memecoins
-    tier5: 0.01           # Modified to limit HIGH_VOL coins
+    tier2: 0.15           
+    tier3: 0.05           
+    tier4_meme: 0.01      
+    tier5: 0.01           
     trump: 0.02
     paxg: 0.15
-  
