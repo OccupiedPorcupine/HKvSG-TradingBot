@@ -339,11 +339,11 @@ risk:
 # EXECUTION ENGINE (Layer 7)
 # -----------------------------------------------------------------------------
 execution:
-  order_timeout_sec: 60                  
-  max_resubmissions: 3                   
+  order_timeout_sec: 120                  
+  max_resubmissions: 2                   
   risk_exit_acceleration_threshold: 0.02 
-  max_simultaneous_orders: 30            
-  fill_check_delay_sec: 5               
+  max_simultaneous_orders: 10            
+  fill_check_delay_sec: 20               
 
 # -----------------------------------------------------------------------------
 # ADAPTATION & MONITORING (Layer 8)
