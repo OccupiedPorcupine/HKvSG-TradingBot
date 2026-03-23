@@ -49,7 +49,11 @@ universe:
     - ADA
     - DOGE
     - TRX
+    - SOL
+    - XRP
   tier_2_large_alts:
+    - AVAX
+    - TAO
     - LINK
     - DOT
     - NEAR
@@ -62,6 +66,7 @@ universe:
     - SEI
     - S
   tier_3_defi:
+    - OMNI
     - AAVE
     - UNI
     - CRV
@@ -147,8 +152,8 @@ features:
   ema_periods:
     fast: 20
     medium: 50
-    trend_fast: 60     # EMA(60) for trend filter
-    trend_slow: 240    # EMA(240) for trend filter
+    trend_fast: 15     # EMA(60) for trend filter
+    trend_slow: 60    # EMA(240) for trend filter
 
   # cross-sectional momentum composite weights (must sum to 1.0)
   momentum_composite_weights:
@@ -171,7 +176,7 @@ features:
   ml_zscore_lookback: 100
 
 # -----------------------------------------------------------------------------
-# REGIME DETECTION (Layer 3)
+# REGIME DETECTION (Layer 3) # obsolete, replaced with phase 2
 # -----------------------------------------------------------------------------
 regime:
   update_cadence_sec: 300              # regime classification every 5 min
@@ -251,7 +256,7 @@ signals:
     ic_resume_window_hr: 12               # for 12 continuous hours
 
 # -----------------------------------------------------------------------------
-# PORTFOLIO CONSTRUCTION (Layer 5)
+# PORTFOLIO CONSTRUCTION (Layer 5) --> Overwritten by Phase2, this part is now obsolete
 # -----------------------------------------------------------------------------
 portfolio:
   # regime-conditional deployment targets (fraction of NAV in crypto)
@@ -511,20 +516,20 @@ random_seeds:
 
 regime:
   btc_symbol: "BTC"
-  breadth_bull_threshold: 0.55         # fraction of altcoins positive (4h)
-  breadth_bear_threshold: 0.40
+  breadth_bull_threshold: 0.35         # fraction of altcoins positive (4h) # Changed from 0.55. Now only 35% of coins need to be pumping!
+  breadth_bear_threshold: 0.25         # Changed from 0.40
   contagion_ratio_threshold: 0.80
   contagion_loss_threshold: 0.01       # 1% avg 5min loss
   contagion_small_portfolio_size: 6
   contagion_small_ratio_threshold: 0.90
   contagion_small_loss_threshold: 0.015
   btc_vol_crisis_percentile: 90
-  upgrade_persistence_minutes: 30
-  crisis_exit_persistence_minutes: 30
+  upgrade_persistence_minutes: 5      # Update for faster response
+  crisis_exit_persistence_minutes: 5  # Update for faster crisis response and exit
 
 trend_penalty:
-  ema_short_period: 60                 # minutes
-  ema_long_period: 240
+  ema_short_period: 15                 # minutes # changed from 60
+  ema_long_period: 60                  # Changed from 240
   penalty_sigma: -0.3
   broad_downturn_threshold: 0.70       # fraction of universe with bearish EMA
   broad_downturn_penalty_sigma: -0.15
@@ -571,18 +576,20 @@ portfolio:
     TREND_BEAR: 0.35
     HIGH_VOL_CRISIS: 0.15
   holdings:
-    TREND_BULL: 10
-    MEAN_REVERT: 6
-    TREND_BEAR: 4
+    TREND_BULL: 30
+    MEAN_REVERT: 20
+    TREND_BEAR: 10
     HIGH_VOL_CRISIS: 0
-  turnover_max_pct: 0.25
+  turnover_max_pct: 1.00 # changed from 0.25
   min_trade_nav_pct: 0.002
+  rebalance_cadence_sec: 300 # add rebalance configuration for faster trades
   tier_caps:
-    tier1: 0.08
+    tier1: 0.50           # Modified for prioritization
     tier1_doge: 0.05
-    tier2: 0.08
-    tier3: 0.06
-    tier4_meme: 0.03
-    tier5: 0.02
+    tier2: 0.15           # Modified for prioritization
+    tier3: 0.05           # Modified for prioritization
+    tier4_meme: 0.01      # Modified to limit memecoins
+    tier5: 0.01           # Modified to limit HIGH_VOL coins
     trump: 0.02
     paxg: 0.15
+  
