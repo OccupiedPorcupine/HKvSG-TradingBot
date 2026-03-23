@@ -215,7 +215,9 @@ async def main():
     )
 
     # Execution Engine
-    order_queue = OrderPriorityQueue()
+    # 1. Make the Waiting Room massive (Hardcode to 100 so it NEVER drops an order)
+    order_queue = OrderPriorityQueue(max_orders=100) 
+    
     order_manager = OrderManager(
         exec_client=exec_client,
         position_tracker=position_tracker,
@@ -226,13 +228,14 @@ async def main():
             max_resubmissions=config.get("execution.max_resubmissions", 3),
             risk_exit_acceleration_threshold=config.get(
                 "execution.risk_exit_acceleration_threshold", 0.02
-            ),  # C-04: was not passed from config
+            ),
+            # 2. Keep the Bouncer tied to your safe config limit of 10!
             max_simultaneous_orders=config.get(
-                "execution.max_simultaneous_orders", 15
-            ),  # C-05: was not passed from config
+                "execution.max_simultaneous_orders", 10
+            ),
             fill_check_delay_sec=config.get(
-                "execution.fill_check_delay_sec", 5
-            ),  # C-06: was not passed from config
+                "execution.fill_check_delay_sec", 20
+            ),
         ),
         signal_health_monitor=signal_health_monitor,
     )
@@ -242,6 +245,46 @@ async def main():
     # Debug tick config
     debug_tick_enabled = config.get("debug_tick.enabled", False)
     debug_watch = config.get("debug_tick.watch_assets", [])
+
+    # =========================================================================
+    # --- ORPHAN ORDER SWEEP (The Zombie Killer v2) ---
+    # =========================================================================
+    async def sweep_orphans():
+        """Surgically assassinate any orders the exchange has that the bot forgot about."""
+        logger.info("🧹 Pre-trade Sweep: Checking exchange for zombie pairs...")
+        try:
+            # 1. Ask exchange which PAIRS have stuck orders (bypasses the broken query_order endpoint)
+            pending_info = await base_client.get_pending_count()
+            stuck_pairs = pending_info.get("OrderPairs", [])
+            
+            # Extract pairs our bot is actively tracking right now to keep them safe
+            known_active_pairs = {
+                active.pending_order.pair 
+                for active in order_manager.active_orders.values()
+            }
+            
+            cleared_count = 0
+            for pair in stuck_pairs:
+                if pair not in known_active_pairs:
+                    logger.warning("💀 Found Orphan Zombie holding your cash in %s! Cancelling...", pair)
+                    # Use exec_client to safely mass-cancel the pair
+                    await exec_client.cancel_pair_orders(pair)
+                    cleared_count += 1
+                    
+            if cleared_count > 0:
+                logger.info("✨ Sweep complete. Cleared zombies across %d pairs. Re-syncing balances...", cleared_count)
+                # Resync balance instantly so the Portfolio Constructor has accurate USD to spend
+                balances = await exec_client.get_balance()
+                position_tracker.sync_from_exchange(balances)
+            else:
+                logger.debug("✅ No orphan orders found.")
+        except Exception as e:
+            # If the API throws its specific "empty" error, treat it as a success!
+            if "no pending order" in str(e).lower():
+                logger.info("✅ No orphan orders found (exchange confirmed empty queue).")
+            else:
+                logger.warning("❌ Orphan sweep failed (non-fatal): %s", e)
+    # =========================================================================
 
     async def data_ingestion_tick():
         """Every 60s: Fetch prices, update features, run risk checks."""
@@ -410,6 +453,10 @@ async def main():
         if not system_state.can_rebalance:
             logger.warning("Rebalance skipped due to system safe-mode or stale data.")
             return
+
+        # 👉 INJECT THE SWEEP HERE
+        await sweep_orphans()
+        
         if feature_engine._regime_inputs is None:
             # Re-try on_new_bar if regime inputs are missing but buffers are full
             if ingestion.get_bar_count("BTC") > 0:
