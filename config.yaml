@@ -342,7 +342,7 @@ execution:
   order_timeout_sec: 120                  
   max_resubmissions: 2                   
   risk_exit_acceleration_threshold: 0.02 
-  max_simultaneous_orders: 10            
+  max_simultaneous_orders: 10           
   fill_check_delay_sec: 20               
 
 # -----------------------------------------------------------------------------
