@@ -7,6 +7,7 @@ set +a
 
 # Set Python path to the root directory
 export PYTHONPATH=.
+python src/main.py
 
 echo "Initializing APEX production loop..."
 
