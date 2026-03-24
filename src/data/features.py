@@ -563,6 +563,15 @@ class FeatureEngine:
         for asset in all_assets:
             if asset in ("BTC", "PAXG"):
                 continue
+                
+            # FIX: The Junk-Coin Drag
+            # Only use the structural Main Pool (Tiers 1-3) to gauge macro health.
+            # Exclude Memes and Obscure coins, which naturally bleed and falsely drag
+            # the portfolio breadth below the 0.25 bear threshold.
+            tier = self._ingestion.get_tier(asset)
+            if tier in (TIER_4_MEME, TIER_5_OBSCURE, TIER_SPECIAL_PAXG):
+                continue
+
             if self._ingestion.get_asset_status(asset) == AssetStatus.STALE:
                 continue
 
@@ -601,6 +610,16 @@ class FeatureEngine:
         # Compute percentile rank
         samples = np.array(self._btc_vol_samples, dtype=np.float64)
         percentile = float(np.sum(samples <= btc_vol_1h) / len(samples) * 100)
+
+        # FIX: The "Myopic Baseline" Trap
+        # Upon restart, the buffer only holds 24 hours of data. If yesterday was quiet,
+        # normal market vol today will permanently rank at the 100th percentile, trapping
+        # the bot in HIGH_VOL_CRISIS. We blend the raw percentile with a neutral 50.0
+        # until a mature 3-day baseline (864 samples) is formed to ensure stability.
+        mature_samples = 864.0
+        if len(samples) < mature_samples:
+            weight = len(samples) / mature_samples
+            percentile = (percentile * weight) + (50.0 * (1.0 - weight))
 
         return percentile
 
@@ -696,7 +715,7 @@ class FeatureEngine:
             Tuple of (ema_60, ema_240). Either may be None if not computed.
         """
         emas = self._emas.get(asset, {})
-        return emas.get(60), emas.get(240)
+        return emas.get(30), emas.get(120)
 
     def get_asset_volatility(self, asset: str, window: str) -> Optional[float]:
         """Get realized volatility for an asset and window.
@@ -772,11 +791,7 @@ class FeatureEngine:
         return self._bar_count
 
     def warm_start(self) -> None:
-        """Recompute EMAs from recovered price history after crash recovery.
-
-        Call this after loading Parquet backup data into the ingestion
-        manager's price buffers.
-        """
+        """Recompute EMAs from recovered price history after crash recovery."""
         for asset in self._ingestion.get_all_assets():
             prices = self._ingestion.get_prices_array(asset)
             if len(prices) == 0:
@@ -794,10 +809,19 @@ class FeatureEngine:
                     ret = (prices[i] - prices[i - 1]) / prices[i - 1]
                     self._returns_1m[asset].append(ret)
 
-            # Mark asset so on_new_bar skips redundant EMA/return update
-            self._ema_warm.add(asset)
+        # FIX: Backfill the BTC Volatility Sample Distribution
+        btc_returns = self._returns_1m.get("BTC", [])
+        if len(btc_returns) > 60:
+            import numpy as np
+            btc_ret_list = list(btc_returns)
+            # Sample every N bars mimicking live interval
+            for i in range(60, len(btc_ret_list), self._btc_vol_sample_interval):
+                slice_1h = btc_ret_list[i-60:i]
+                vol = float(np.std(slice_1h, ddof=1))
+                if np.isfinite(vol):
+                    self._btc_vol_samples.append(vol)
 
-        # Run full feature computation (EMAs + returns already built)
+        # Run full feature computation
         self.on_new_bar()
         logger.info(
             "WARM_START recomputed EMAs and features for %d assets",
