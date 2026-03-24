@@ -183,12 +183,18 @@ class RegimeDetector:
             )
             self._cold_start = False
 
-        # Input validation
+        # Input validation - FIXED: Use safe defaults instead of NaN to prevent 
+        # locking the regime during data accumulation phases.
+        safe_btc_4h = regime_inputs.btc_4h_return if regime_inputs.btc_4h_return is not None else 0.0
+        safe_btc_24h = regime_inputs.btc_24h_return if regime_inputs.btc_24h_return is not None else 0.0
+        safe_breadth = regime_inputs.altcoin_breadth if regime_inputs.altcoin_breadth is not None else 0.50
+        safe_vol = regime_inputs.btc_vol_percentile if regime_inputs.btc_vol_percentile is not None else 50.0
+        
         if not validate_regime_inputs(
-            regime_inputs.btc_4h_return if regime_inputs.btc_4h_return is not None else float("nan"),
-            regime_inputs.btc_24h_return if regime_inputs.btc_24h_return is not None else float("nan"),
-            regime_inputs.altcoin_breadth if regime_inputs.altcoin_breadth is not None else float("nan"),
-            regime_inputs.btc_vol_percentile if regime_inputs.btc_vol_percentile is not None else 50.0, # change the bot state during the first 50 minutes to start buying major coins
+            safe_btc_4h,
+            safe_btc_24h,
+            safe_breadth,
+            safe_vol,
         ):
             logger.warning(
                 "REGIME: invalid inputs, keeping current regime %s",
@@ -355,6 +361,9 @@ class RegimeDetector:
             return RegimeType.TREND_BEAR
 
         # Rule 5: Default
+        if btc_4h is None or breadth is None:
+            logger.info("REGIME WARM-UP: Missing 4h data. Defaulting to safe MEAN_REVERT state.")
+            
         return RegimeType.MEAN_REVERT
 
     # ------------------------------------------------------------------
