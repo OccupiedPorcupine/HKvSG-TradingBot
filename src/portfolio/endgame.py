@@ -6,6 +6,8 @@ complete exit to avoid last-minute drawdowns that would damage Calmar.
 
 The schedule is loaded from config and supports clean reset for Round 2.
 """
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timezone
 
