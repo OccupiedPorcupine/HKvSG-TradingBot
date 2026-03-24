@@ -36,7 +36,6 @@ universe:
     - BNB
     - LTC
     - ADA
-    - DOGE
     - TRX
     - SOL
     - XRP
@@ -72,6 +71,7 @@ universe:
   tier_4_meme:
     - SHIB
     - PEPE
+    - DOGE
     - FLOKI
     - WIF
     - BONK
