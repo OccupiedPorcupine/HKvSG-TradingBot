@@ -422,6 +422,14 @@ async def main():
 
         # Also check status of pending orders
         await order_manager.check_active_orders()
+    
+    async def pipeline_tick():
+        """Unified 60s tick ensuring data freshness before risk checks."""
+        # 1. Fetch fresh data
+        await data_ingestion_tick()
+
+        # 2. Immediately run risk checks with the new data
+        await risk_check_tick()
 
     async def regime_update_tick():
         """Every 5m: Update market regime."""
@@ -738,13 +746,12 @@ async def main():
 
     # Schedule all ticks
     # data_ingestion and risk_check should run immediately to keep system fresh
-    await scheduler.schedule_job("data_ingestion", 60, data_ingestion_tick, immediate=True)
-    await scheduler.schedule_job("risk_check", 60, risk_check_tick, immediate=True)
+    await scheduler.schedule_job("main_pipeline", 60, pipeline_tick, immediate=True) # combination of data_ingestion and risk_check
     # regime and rebalance should wait for their first interval since we already triggered them above
     await scheduler.schedule_job("regime_update", 300, regime_update_tick, immediate=False)
     await scheduler.schedule_job("rebalance", config.get("portfolio.rebalance_cadence_sec", 3600), rebalance_tick, immediate=False)
     await scheduler.schedule_job("monitoring", 3600, monitoring_tick, immediate=False)
-
+    
     # --- Portfolio Breakdown (config-driven) ---
     if config.get("portfolio_breakdown.enabled", False):
         _pb_cadence = config.get("portfolio_breakdown.cadence_sec", 300)
