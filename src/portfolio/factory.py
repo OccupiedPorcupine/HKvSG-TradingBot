@@ -57,9 +57,9 @@ def build_tier_cap_overrides(config: Config) -> dict[str, float]:
         Dict of asset -> cap override (only for assets with special caps).
     """
     caps: dict[str, float] = {}
-    caps["DOGE"] = config.get("tier_caps.doge", 0.05)
-    caps["TRUMP"] = config.get("tier_caps.trump", 0.02)
-    caps["PAXG"] = config.get("tier_caps.paxg", 0.15)
+    caps["DOGE"] = config.get("portfolio.tier_caps.tier1_doge", 0.05)
+    caps["TRUMP"] = config.get("portfolio.tier_caps.trump", 0.02)
+    caps["PAXG"] = config.get("portfolio.tier_caps.paxg", 0.15)
     return caps
 
 
@@ -73,11 +73,11 @@ def build_tier_cap_defaults(config: Config) -> dict[str, float]:
         Dict mapping tier keys to their default caps.
     """
     return {
-        "tier_1_2": config.get("tier_caps.tier_1_2", 0.08),
-        "tier_3": config.get("tier_caps.tier_3", 0.06),
-        "tier_4_meme": config.get("tier_caps.tier_4_meme", 0.03),
-        "tier_5_obscure": config.get("tier_caps.tier_5_obscure", 0.02),
-        "special": config.get("tier_caps.paxg", 0.15),
+        "tier_1_2": config.get("portfolio.tier_caps.tier_1_2", 1.0), # Restriction removed, using phase 1 key
+        "tier_3": config.get("portfolio.tier_caps.tier_3", 1.0),   # Restriction removed, using phase 1 key
+        "tier_4_meme": config.get("portfolio.tier_caps.tier4_meme", 0.01),
+        "tier_5_obscure": config.get("portfolio.tier_caps.tier5", 0.01),
+        "special": config.get("portfolio.tier_caps.paxg", 0.15),
     }
 
 
@@ -86,6 +86,7 @@ def create_portfolio_constructor(
     regime_detector=None,
     trend_penalty=None,
     meme_pool=None,
+    tier5_pool=None,
     endgame=None,
     paxg=None,
     risk_manager=None,
@@ -109,6 +110,7 @@ def create_portfolio_constructor(
         regime_detector=regime_detector,
         trend_penalty=trend_penalty,
         meme_pool=meme_pool,
+        tier5_pool=tier5_pool,
         endgame=endgame,
         paxg=paxg,
         risk_manager=risk_manager,

@@ -99,20 +99,11 @@ class RegimeDetector:
             "contagion_small_loss_threshold", 0.015
         )
 
-        # Transition thresholds
-        transitions = regime_cfg.get("transitions", {})
-        self._upgrade_bars = transitions.get(
-            "upgrade_confirmation_bars",
-            regime_cfg.get("upgrade_persistence_minutes", 30),
-        )
-        self._crisis_exit_contagion = transitions.get(
-            "crisis_exit_contagion_below", 0.50
-        )
-        self._crisis_exit_vol = transitions.get("crisis_exit_vol_below", 70)
-        self._crisis_exit_bars = transitions.get(
-            "crisis_exit_confirmation_bars",
-            regime_cfg.get("crisis_exit_persistence_minutes", 30),
-        )
+        # Transition thresholds (Phase 2 flattened paths)
+        self._upgrade_bars = regime_cfg.get("upgrade_persistence_minutes", 30)
+        self._crisis_exit_contagion = regime_cfg.get("crisis_exit_contagion_below", 0.50)
+        self._crisis_exit_vol = regime_cfg.get("crisis_exit_vol_below", 70)
+        self._crisis_exit_bars = regime_cfg.get("crisis_exit_persistence_minutes", 30)
 
         # Crisis exit tracking
         self._crisis_exit_streak: int = 0

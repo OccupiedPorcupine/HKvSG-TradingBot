@@ -23,6 +23,7 @@ from src.signals.momentum import MomentumSignal
 from src.portfolio.factory import create_portfolio_constructor, get_current_weights, build_orders_from_weights
 from src.signals.trend_penalty import TrendPenaltyEngine
 from src.signals.meme_pool import MemePoolManager
+from src.signals.tier5_pool import Tier5PoolSignal
 from src.portfolio.endgame import EndgameManager
 from src.portfolio.paxg_allocator import PAXGAllocator
 from src.risk.factory import create_risk_manager
@@ -180,6 +181,12 @@ async def main():
     # Phase 2 components
     trend_penalty = TrendPenaltyEngine(config.raw)
     meme_pool_manager = MemePoolManager(config.raw)
+
+    # Instantiate Tier 5 Pool
+    tier5_assets = set(config.get("universe.tier_5_obscure", []))
+    tier5_pool = Tier5PoolSignal(config.raw, tier5_assets)
+    tier5_pool.enable() # Enable Phase 2 logic
+
     endgame_manager = EndgameManager(config.raw)
     paxg_allocator = PAXGAllocator(config.raw)
 
@@ -189,6 +196,7 @@ async def main():
         regime_detector=regime_detector,
         trend_penalty=trend_penalty,
         meme_pool=meme_pool_manager,
+        tier5_pool=tier5_pool,
         endgame=endgame_manager,
         paxg=paxg_allocator,
         risk_manager=risk_manager,
@@ -467,31 +475,35 @@ async def main():
                 logger.info("Rebalance skipped — waiting for first price bar.")
                 return
 
-        # 1. Signals
+        # 1. Get raw momentum and sentiment
         scores = feature_engine.get_momentum_scores()
-        try:
-            selections = momentum_signal.generate(
-                momentum_scores=scores,
-                regime=regime_detector.state,
-                get_ema_fn=feature_engine.get_ema_values,
-                get_vol_fn=feature_engine.get_asset_volatility,
-                sentiment_scores=feature_engine.get_sentiment_scores(),
-            )
-        except Exception as _sig_err:
-            logger.error("MOMENTUM_SIGNAL failed (non-fatal): %s. Using raw scores.", _sig_err)
+        sentiment = feature_engine.get_sentiment_scores()
 
-        # Update order manager context so every order this cycle logs the correct
-        # regime and momentum score (audit Section 5 Screen 1 compliance).
+        # Apply Sentiment Overlay directly to scores before portfolio construction
+        sentiment_penalty = config.get("signals.sentiment_crowded_penalty", -0.15)
+        sentiment_bonus = config.get("signals.sentiment_reversal_bonus", 0.10)
+        
+        for asset, sent_score in sentiment.items():
+            if asset in scores:
+                if sent_score > 0.90:  # Crowded long
+                    scores[asset] += sentiment_penalty
+                    logger.debug("SENTIMENT PENALTY: %s (score: %.2f)", asset, sent_score)
+                elif sent_score < 0.15:  # Oversold / Panic
+                    scores[asset] += sentiment_bonus
+                    logger.debug("SENTIMENT BONUS: %s (score: %.2f)", asset, sent_score)
+
+        # Update order manager context for logging
         order_manager.update_context(
             regime_state=regime_detector.state.current_regime.value,
             momentum_scores=scores,
         )
 
-        # --- Phase 2: Portfolio Construction (regime-conditional pipeline) ---
+        # --- Phase 2: Portfolio Construction ---
         current_weights = get_current_weights(position_tracker)
         try:
+            # Now passing the SENTIMENT-ADJUSTED scores
             construction_result = portfolio_constructor.construct(
-                momentum_scores=scores,
+                momentum_scores=scores, 
                 current_positions=current_weights,
                 nav=position_tracker.nav,
                 market_data=feature_engine,

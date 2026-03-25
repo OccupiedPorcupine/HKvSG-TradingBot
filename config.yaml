@@ -50,6 +50,7 @@ universe:
     - ICP
     - SEI
     - S
+    - XLM
   tier_3_defi:
     - OMNI
     - AAVE
@@ -90,6 +91,12 @@ universe:
     - STO
     - WLD
     - POL
+    - HEMI
+    - WLFI
+    - BIO
+    - PLUME
+    - XPL
+    - TUT
   special:
     paxg: "PAXG"
     trump: "TRUMP"
@@ -151,6 +158,9 @@ regime:
   contagion_small_ratio_threshold: 0.90
   contagion_small_loss_threshold: 0.015
   btc_vol_crisis_percentile: 90
+
+  crisis_exit_contagion_below: 0.50
+  crisis_exit_vol_below: 70
   
   # Transition Timers
   upgrade_persistence_minutes: 5      
@@ -181,7 +191,7 @@ signals:
     probability_threshold_low: 0.45
     ic_halt_threshold: 0.02               
     ic_resume_threshold: 0.04             
-    ic_resume_window_hr: 12               
+    ic_resume_window_hr: 12           
 
 # Phase 2 Signal Modules (Root-level mapping for Managers)
 trend_penalty:
@@ -221,7 +231,7 @@ tier5_pool:
 # PORTFOLIO CONSTRUCTION (Layer 5 - Phase 2 Unified)
 # -----------------------------------------------------------------------------
 portfolio:
-  max_crypto_exposure: 0.90
+  max_crypto_exposure: 1.00
   btc_vol_high_vol_threshold: 70
   turnover_max_pct: 1.00 
   min_trade_nav_pct: 0.002
@@ -235,21 +245,26 @@ portfolio:
     HIGH_VOL_CRISIS: 0.15
 
   holdings:
-    TREND_BULL: 30
-    MEAN_REVERT: 20
-    TREND_BEAR: 10
+    TREND_BULL: 10
+    MEAN_REVERT: 7
+    TREND_BEAR: 5
     HIGH_VOL_CRISIS: 0
 
   tier_caps:
-    tier1: 0.50           
-    tier1_doge: 0.05
-    tier2: 0.15           
-    tier3: 0.05           
+    tier1: 1.00           # Restriction removed (100%)
+    tier1_doge: 0.05      # Retained DOGE-specific risk cap
+    tier2: 1.00           # Restriction removed (100%)
+    tier3: 1.00           # Restriction removed (100%)
     tier4_meme: 0.01      
     tier5: 0.01           
     trump: 0.02
     paxg: 0.15
     redistribution_max_iterations: 5
+
+    # To prevent the bot from falling back to old Phase 1 keys if accessed 
+    # via legacy paths, explicitly set these to 1.0 as well:
+    tier_1_2: 1.00
+    tier_3: 1.00
 
   adaptive_exposure:
     enabled: false                       

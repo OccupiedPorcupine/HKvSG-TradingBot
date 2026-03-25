@@ -59,6 +59,7 @@ class PortfolioConstructor:
         regime_detector: Any,
         trend_penalty: Any,
         meme_pool: Any,
+        tier5_pool: Any,
         endgame: Any,
         paxg: Any,
         risk_manager: Any = None,
@@ -77,6 +78,7 @@ class PortfolioConstructor:
         self.regime_detector = regime_detector
         self.trend_penalty = trend_penalty
         self.meme_pool = meme_pool
+        self.tier5_pool = tier5_pool
         self.endgame = endgame
         self.paxg = paxg
         self.risk_manager = risk_manager
@@ -84,6 +86,9 @@ class PortfolioConstructor:
         # Read config (support both raw dict and Config wrapper)
         self._cfg = config
         self._read_config(config)
+
+        # Pull the max allocation for Tier 5 assets
+        self._tier5_alloc_max = self._cfg_get("tier5_pool.allocation_pct_max", 0.02)
 
         # Track last construction for explain()
         self._last_metadata: dict = {}
@@ -371,6 +376,26 @@ class PortfolioConstructor:
         )
 
         # ----------------------------------------------------------
+        # Step 10.5: Get Tier 5 pool allocations
+        # ----------------------------------------------------------
+        tier5_weights = {}
+        if self.tier5_pool and market_data:
+            # Generate returns dict of {asset: score}
+            t5_selections = self.tier5_pool.generate(
+                momentum_scores, 
+                self.regime_detector.state, 
+                market_data.get_return
+            )
+            # Size each selected asset
+            for asset in t5_selections:
+                tier5_weights[asset] = self._tier5_alloc_max
+                
+        logger.info(
+            "PORTFOLIO Step 10.5: tier5 allocations=%d coins, total=%.1f%%",
+            len(tier5_weights), sum(tier5_weights.values()) * 100,
+        )
+
+        # ----------------------------------------------------------
         # Step 11: Get PAXG target
         # ----------------------------------------------------------
         paxg_weight = self.paxg.get_target_weight(regime)
@@ -380,7 +405,7 @@ class PortfolioConstructor:
         # Step 12: Combine and validate total doesn't exceed 1.0
         # ----------------------------------------------------------
         target_weights = self._combine_weights(
-            crypto_weights, meme_weights, paxg_weight, target_exposure
+            crypto_weights, meme_weights, tier5_weights, paxg_weight, target_exposure
         )
         logger.info(
             "PORTFOLIO Step 12: combined total=%.1f%% (%d assets)",
@@ -615,6 +640,7 @@ class PortfolioConstructor:
         self,
         crypto_weights: dict[str, float],
         meme_weights: dict[str, float],
+        tier5_weights: dict[str, float],
         paxg_weight: float,
         target_exposure: float,
     ) -> dict[str, float]:
@@ -627,23 +653,28 @@ class PortfolioConstructor:
         """
         combined: dict[str, float] = {}
 
-        # Meme comes from crypto budget
-        meme_total = sum(meme_weights.values())
-        crypto_budget = max(0.0, target_exposure - meme_total)
+        # Both Meme and Tier 5 come from the main crypto budget
+        special_pool_total = sum(meme_weights.values()) + sum(tier5_weights.values())
+        crypto_budget = max(0.0, target_exposure - special_pool_total)
 
-        # Scale crypto weights to fit within reduced budget
+        # Scale main crypto weights to fit within reduced budget
         crypto_total = sum(crypto_weights.values())
         if crypto_total > crypto_budget and crypto_total > 0:
             scale = crypto_budget / crypto_total
             crypto_weights = {a: w * scale for a, w in crypto_weights.items()}
 
-        # Merge crypto weights
+        # Merge main crypto weights
         for asset, weight in crypto_weights.items():
             if weight > 1e-6:
                 combined[asset] = weight
 
-        # Merge meme weights (no double-counting with crypto)
+        # Merge meme weights
         for asset, weight in meme_weights.items():
+            if weight > 1e-6:
+                combined[asset] = weight
+
+        # Merge Tier 5 weights
+        for asset, weight in tier5_weights.items():
             if weight > 1e-6:
                 combined[asset] = weight
 

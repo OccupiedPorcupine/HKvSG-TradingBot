@@ -54,13 +54,13 @@ class MomentumSignal:
         self._config = config
         self._eligible = tier_1_3_assets
 
-        # Top-N selections by regime
-        top_n_cfg = config.get("signals", {}).get("top_n_selections", {})
+        # Top-N selections by regime (Phase 2 path)
+        holdings_cfg = config.get("portfolio", {}).get("holdings", {})
         self._top_n: dict[RegimeType, int] = {
-            RegimeType.TREND_BULL: top_n_cfg.get("trend_bull", 10),
-            RegimeType.MEAN_REVERT: top_n_cfg.get("mean_revert", 6),
-            RegimeType.TREND_BEAR: top_n_cfg.get("trend_bear", 4),
-            RegimeType.HIGH_VOL_CRISIS: top_n_cfg.get("crisis", 0),
+            RegimeType.TREND_BULL: holdings_cfg.get("TREND_BULL", 30),
+            RegimeType.MEAN_REVERT: holdings_cfg.get("MEAN_REVERT", 20),
+            RegimeType.TREND_BEAR: holdings_cfg.get("TREND_BEAR", 10),
+            RegimeType.HIGH_VOL_CRISIS: holdings_cfg.get("HIGH_VOL_CRISIS", 0),
         }
 
         # Turnover Buffer (Hysteresis): exit if drops below N + buffer

@@ -45,7 +45,7 @@ class Tier5PoolSignal:
             config: Full config.yaml as dict.
             tier_5_assets: Set of Tier 5 asset symbols.
         """
-        t5_cfg = config.get("signals", {}).get("tier5_pool", {})
+        t5_cfg = config.get("tier5_pool", {})
         self._eligible = tier_5_assets
         self._return_threshold = t5_cfg.get(
             "activation_4h_return_threshold", 0.10
