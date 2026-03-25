@@ -63,6 +63,9 @@ class TrendPenaltyEngine:
             if not self.is_warmed_up(asset):
                 needed = self._ema_long_period - self._bars_seen.get(asset, 0)
                 logger.debug("TREND_PENALTY WARMUP: %s needs %d more bars", asset, needed)
+                # FIX: Do not give unproven assets a free pass. 
+                # Hit them with the active penalty to protect the portfolio from flash-pumps.
+                adjusted_scores[asset] = score + penalty_to_apply
                 continue
 
             ema_60 = self._ema_short[asset]

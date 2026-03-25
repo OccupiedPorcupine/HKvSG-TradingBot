@@ -38,6 +38,7 @@ universe:
     - XRP
   tier_2_large_alts:
     - AVAX
+    - XLM
     - TAO
     - LINK
     - DOT
@@ -59,6 +60,7 @@ universe:
     - ONDO
     - ENA
     - FET
+    - VIRTUAL
     - CAKE
     - EIGEN
     - CFX
@@ -89,6 +91,12 @@ universe:
     - STO
     - WLD
     - POL
+    - WLFI
+    - BIO
+    - HEMI
+    - PLUME
+    - TUT
+    - XPL
   special:
     paxg: "PAXG"
     trump: "TRUMP"
@@ -226,14 +234,24 @@ portfolio:
     hard_cap: 0.15
 
   tier_caps:
-    tier1: 0.50           # 50% max allocation to safe heavyweights
+    tier1: 0.40           # 40% max allocation to safe heavyweights
     tier1_doge: 0.05
-    tier2: 0.15           # 15% max allocation to Tier 2
-    tier3: 0.05           
+    tier2: 0.25           # 25% max allocation to Tier 2
+    tier3: 0.15           
     tier4_meme: 0.01      # Restrict junk coins
     tier5: 0.01           
     trump: 0.02
     paxg: 0.15
+
+  # NEW BLOCK: Dynamic Caps (Regime-Scaled Beta)
+  dynamic_caps:
+    enabled: true
+    alt_season_breadth: 0.70    # Threshold for Altcoin Season
+    alt_season_tier1: 0.25      # Shrink BTC/ETH to 25% to free up capital
+    alt_season_tier2: 0.30      # Expand Tier 2 large caps for max growth
+    safe_season_breadth: 0.40   # Threshold for choppy/bearish market
+    safe_season_tier1: 0.60     # Retreat to BTC/ETH safety (60%)
+    safe_season_tier2: 0.10     # Shrink Tier 2 exposure to reduce beta risk
 
 # -----------------------------------------------------------------------------
 # END-GAME DE-RISKING (Unified)

@@ -163,6 +163,16 @@ class PortfolioConstructor:
             "signals.vol_exclusion_multiplier", 2.0
         )
 
+        # NEW: Dynamic Caps Initialization
+        dyn_cfg = _get("portfolio.dynamic_caps", {})
+        self._dyn_caps_enabled = dyn_cfg.get("enabled", False)
+        self._dyn_alt_breadth = dyn_cfg.get("alt_season_breadth", 0.70)
+        self._dyn_alt_t1 = dyn_cfg.get("alt_season_tier1", 0.25)
+        self._dyn_alt_t2 = dyn_cfg.get("alt_season_tier2", 0.30)
+        self._dyn_safe_breadth = dyn_cfg.get("safe_season_breadth", 0.40)
+        self._dyn_safe_t1 = dyn_cfg.get("safe_season_tier1", 0.60)
+        self._dyn_safe_t2 = dyn_cfg.get("safe_season_tier2", 0.10)
+
     def _cfg_get(self, key: str, default: Any = None) -> Any:
         """Get config value supporting both dict and Config wrapper."""
         # For Config wrapper objects (non-dict) with dot-path .get()
@@ -314,7 +324,7 @@ class PortfolioConstructor:
         tier3_scores = {}
         
         for asset, score in adjusted_scores.items():
-            tier = self._asset_tier_map.get(asset, "tier3") # Default to tier 3 if missing
+            tier = self._asset_tier_map.get(asset, "tier5") # Default to tier 5 if missing
             if tier == "tier1":
                 tier1_scores[asset] = score
             elif tier == "tier2":
@@ -857,11 +867,36 @@ class PortfolioConstructor:
         )
 
     def _get_cap(self, asset: str) -> float:
-        """Look up tier cap for an asset."""
+        """Look up tier cap, applying dynamic market-breadth scaling."""
         if asset in self._asset_cap_overrides:
             return self._asset_cap_overrides[asset]
+            
         tier = self._asset_tier_map.get(asset, "tier_1_2")
-        return self._tier_cap_defaults.get(tier, 0.08)
+        base_cap = self._tier_cap_defaults.get(tier, 0.08)
+        
+        # If dynamic caps are disabled, return the static config cap
+        if not getattr(self, "_dyn_caps_enabled", False):
+            return base_cap
+            
+        # Fetch the current altcoin breadth from the regime state
+        breadth = getattr(self.regime_detector.state, "altcoin_breadth", None)
+        if breadth is None:
+            return base_cap
+            
+        # Apply Regime-Scaled Beta logic
+        if tier == "tier1":
+            if breadth > self._dyn_alt_breadth:
+                return self._dyn_alt_t1  # Alt season: lower BTC/ETH cap
+            elif breadth < self._dyn_safe_breadth:
+                return self._dyn_safe_t1 # Chop/Bear: retreat to safety
+                
+        elif tier == "tier2":
+            if breadth > self._dyn_alt_breadth:
+                return self._dyn_alt_t2  # Alt season: expand Tier 2
+            elif breadth < self._dyn_safe_breadth:
+                return self._dyn_safe_t2 # Chop/Bear: restrict Tier 2
+                
+        return base_cap
 
     # ==================================================================
     # Explain (for judges and debugging)
