@@ -116,11 +116,12 @@ features:
     trend_slow: 120    
 
   # THE BARBELL MOMENTUM: Catches fast altcoins while remembering Major trends
+  # Corrected to your 1h/4h/12h/24h request
   momentum_composite_weights:
-    rank_1h: 0.30
-    rank_4h: 0.50
+    rank_1h: 0.40
+    rank_4h: 0.30
     rank_12h: 0.20
-    rank_24h: 0.00
+    rank_24h: 0.10
 
   volatility_windows: [60, 240, 1440]
   btc_vol_percentile_lookback_days: 7
@@ -171,10 +172,10 @@ trend_penalty:
 meme_pool:
   enabled: true
   symbols: ["SHIB", "PEPE", "FLOKI", "WIF", "BONK", "PUMP", "PENGU", "1000CHEEMS"]
-  allocation_pct: 0.03               
-  max_allocation_per_coin: 0.03
+  allocation_pct: 0.001                # Enforced 0.1%
+  max_allocation_per_coin: 0.001       # Enforced 0.1%
   top_n: 2                  
-  trailing_stop_pct: 0.12            
+  trailing_stop_pct: 0.08              # 8% to match your new risk rules
   active_regimes: ["TREND_BULL"]
 
 tier5_pool:
@@ -183,8 +184,9 @@ tier5_pool:
   allocation_pct_min: 0.01              
   allocation_pct_max: 0.02              
   max_selections: 2                     
-  trailing_stop_pct: 0.12               
+  trailing_stop_pct: 0.08               
   active_regimes: ["TREND_BULL"]
+
 
 # -----------------------------------------------------------------------------
 # PORTFOLIO CONSTRUCTION (Unified block)
@@ -226,14 +228,12 @@ portfolio:
     hard_cap: 0.15
 
   tier_caps:
-    tier1: 0.50           # 50% max allocation to safe heavyweights
+    tier1: 1.00           # Unrestricted
     tier1_doge: 0.05
-    tier2: 0.15           # 15% max allocation to Tier 2
-    tier3: 0.05           
-    tier4_meme: 0.01      # Restrict junk coins
-    tier5: 0.01           
-    trump: 0.02
-    paxg: 0.15
+    tier2: 1.00           # Unrestricted
+    tier3: 1.00           # Unrestricted
+    tier4_meme: 0.001     # Strict 0.1% ($1k) limit
+    tier5: 0.01
 
 # -----------------------------------------------------------------------------
 # END-GAME DE-RISKING (Unified)
