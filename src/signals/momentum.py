@@ -81,124 +81,42 @@ class MomentumSignal:
         )
         self._trend_penalty_enabled = False  # Enable in Phase 2
 
-    def enable_trend_penalty(self) -> None:
-        """Enable the EMA trend penalty (call when entering Phase 2)."""
-        self._trend_penalty_enabled = True
-        logger.info(
-            "Trend penalty enabled: %.2f sigma", self._trend_penalty
-        )
-
     def generate(
         self,
         momentum_scores: dict[str, float],
         regime: RegimeState,
         get_ema_fn: Optional[
             Callable[[str], tuple[Optional[float], Optional[float]]]
-        ] = None,
+        ] = None, # Kept so the orchestrator doesn't break
         get_vol_fn: Optional[
             Callable[[str, str], Optional[float]]
-        ] = None,
+        ] = None, # Kept so the orchestrator doesn't break
         sentiment_scores: Optional[dict[str, float]] = None,
     ) -> dict[str, float]:
-        """Generate momentum signal: rank and select top N assets.
-
-        Args:
-            momentum_scores: Dict of asset → composite momentum score
-                             from Layer 2 (FeatureEngine.get_momentum_scores).
-            regime: Current RegimeState.
-            get_ema_fn: Callable(asset) → (ema_60, ema_240). Used for
-                        trend penalty in Phase 2. None in Phase 1.
-            get_vol_fn: Callable(asset, window) → float. Used for
-                        Phase 1 volatility exclusion filter.
-            sentiment_scores: Dict of asset → sentiment rank (0-1).
-
-        Returns:
-            Dict of selected asset → adjusted momentum score.
-            Only top-N assets are included. Assets not selected are
-            excluded (NOT given score 0 — simply absent).
+        """Generate momentum signal: apply sentiment and return ALL scores.
+        
+        Phase 2 Delegation: Trend penalties, Volatility Filtering, and Top-N 
+        selection are now handled explicitly by src/portfolio/constructor.py 
+        to ensure ranks are calculated accurately AFTER all penalties are applied.
         """
-        # Step 1: Filter to eligible Tier 1-3 assets
-        eligible_scores = {
-            asset: score
-            for asset, score in momentum_scores.items()
-            if asset in self._eligible
+        if not momentum_scores:
+            return {}
+
+        # Step 1: Apply sentiment overlay (from Binance Funding) to ALL assets
+        if self._sentiment_enabled and sentiment_scores:
+            adjusted = self._apply_sentiment_overlay(momentum_scores, sentiment_scores)
+        else:
+            adjusted = dict(momentum_scores)
+
+        # Step 2: Filter out negative baseline momentum
+        positive_adjusted = {
+            asset: score for asset, score in adjusted.items() if score > 0
         }
 
-        if not eligible_scores:
-            self._prev_selections = set()
-            return {}
-
-        # Step 2: Volatility Exclusion Filter (Phase 1)
-        if get_vol_fn is not None:
-            eligible_scores = self._apply_vol_filter(eligible_scores, get_vol_fn)
-
-        if not eligible_scores:
-            self._prev_selections = set()
-            return {}
-
-        # Step 3: Apply trend penalty (Phase 2+)
-        if self._trend_penalty_enabled and get_ema_fn is not None:
-            adjusted = self._apply_trend_penalty(eligible_scores, get_ema_fn)
-        else:
-            adjusted = dict(eligible_scores)
-
-        # Step 4: Apply sentiment overlay (from Binance Funding)
-        if self._sentiment_enabled and sentiment_scores:
-            adjusted = self._apply_sentiment_overlay(adjusted, sentiment_scores)
-
-        # Step 5: Determine top N from regime
-        n = self._top_n.get(regime.current_regime, 10)
-
-        if n <= 0:
-            # CRISIS: exit all
-            self._prev_selections = set()
-            return {}
-
-        # Step 5: Filter out negative momentum, then Rank
-        positive_adjusted = {asset: score for asset, score in adjusted.items() if score > 0}
-        ranked = sorted(positive_adjusted.items(), key=lambda x: x[1], reverse=True)
-        ranked_assets = [asset for asset, _ in ranked]
-        
-        # Step 6: Apply Hysteresis (N+3)
-        # 1. New assets must enter top N
-        # 2. Existing assets remain unless they drop below rank N + buffer
-        final_selections: dict[str, float] = {}
-        
-        # Determine exit threshold (rank is 0-indexed)
-        exit_rank_limit = n + self._hysteresis_buffer
-        
-        for rank, (asset, score) in enumerate(ranked):
-            is_prev = asset in self._prev_selections
-            
-            # Condition 1: Entry (must be in top N)
-            # Condition 2: Stay (must be in top N+buffer)
-            if rank < n or (is_prev and rank < exit_rank_limit):
-                if len(final_selections) < n or is_prev: # Keep prev even if it pushes total > n temporarily?
-                    # ARCH: "Go long the top N assets". 
-                    # Usually N is the target size. If we keep more due to hysteresis,
-                    # we might exceed target N. But we cap at N for new entries.
-                    # Actually, we should probably cap total selections at N for simplicity,
-                    # prioritizing old ones if they are still within N+buffer.
-                    
-                    # Logic: If we already have N assets, only add if it's a prev asset.
-                    if len(final_selections) < n:
-                        final_selections[asset] = score
-                    elif is_prev:
-                        final_selections[asset] = score
-
-        # Update tracking for next rebalance
-        self._prev_selections = set(final_selections.keys())
-
-        if final_selections:
-            logger.debug(
-                "MOMENTUM: regime=%s top_%d selected (hysteresis buffer %d): %s",
-                regime.current_regime.value,
-                n,
-                self._hysteresis_buffer,
-                list(final_selections.keys()),
-            )
-
-        return final_selections
+        # Return the FULL list of positive scores across ALL tiers. 
+        # constructor.py will apply the TrendPenaltyEngine, route Meme coins 
+        # to the Meme pool, and isolate Tier 1-3 for the main pool.
+        return positive_adjusted
 
     def _apply_vol_filter(
         self,
@@ -235,64 +153,6 @@ class MomentumSignal:
             )
             
         return filtered
-
-    def _apply_trend_penalty(
-        self,
-        scores: dict[str, float],
-        get_ema_fn: Callable[
-            [str], tuple[Optional[float], Optional[float]]
-        ],
-    ) -> dict[str, float]:
-        """Apply trend penalty to assets where EMA(60) < EMA(240).
-
-        Scales penalty to -0.15 if >70% of the universe is in a downtrend
-        to preserve ranking discrimination during broad market sell-offs.
-        """
-        adjusted: dict[str, float] = {}
-        
-        # Step 1: Pre-calculate EMA states to determine broad market trend
-        ema_states = {}
-        downtrend_count = 0
-        
-        for asset in scores.keys():
-            ema_60, ema_240 = get_ema_fn(asset)
-            ema_states[asset] = (ema_60, ema_240)
-            if ema_60 is not None and ema_240 is not None and ema_60 < ema_240:
-                downtrend_count += 1
-                
-        # Step 2: Scale penalty if >70% of eligible universe is in downtrend
-        total_assets = len(scores)
-        current_penalty = self._trend_penalty
-        
-        if total_assets > 0 and (downtrend_count / total_assets) > 0.70:
-            current_penalty = -0.15  # Scaled penalty for broad downturns
-            logger.debug(
-                "TREND_PENALTY SCALED: %d/%d assets (%.1f%%) in downtrend. "
-                "Penalty reduced to %.2f",
-                downtrend_count, total_assets, 
-                (downtrend_count / total_assets) * 100, current_penalty
-            )
-
-        # Step 3: Apply the calculated penalty
-        for asset, score in scores.items():
-            ema_60, ema_240 = ema_states[asset]
-
-            if (
-                ema_60 is not None
-                and ema_240 is not None
-                and ema_60 < ema_240
-            ):
-                adjusted_score = score + current_penalty
-                logger.debug(
-                    "TREND_PENALTY: %s score %.4f → %.4f "
-                    "(EMA60=%.2f < EMA240=%.2f)",
-                    asset, score, adjusted_score, ema_60, ema_240,
-                )
-                adjusted[asset] = adjusted_score
-            else:
-                adjusted[asset] = score
-
-        return adjusted
 
     def _apply_sentiment_overlay(
         self,

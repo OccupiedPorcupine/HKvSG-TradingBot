@@ -193,15 +193,15 @@ class PortfolioConstructor:
         _get = self._cfg_get
 
         for asset in _get("universe.tier_1_majors", []):
-            tier_map[asset] = "tier_1_2"
+            tier_map[asset] = "tier1"     # Fixed from "tier_1_2"
         for asset in _get("universe.tier_2_large_alts", []):
-            tier_map[asset] = "tier_1_2"
+            tier_map[asset] = "tier2"     # Fixed from "tier_1_2"
         for asset in _get("universe.tier_3_defi", []):
-            tier_map[asset] = "tier_3"
+            tier_map[asset] = "tier3"     # Fixed to match config formatting
         for asset in _get("universe.tier_4_meme", []):
-            tier_map[asset] = "tier_4_meme"
+            tier_map[asset] = "tier4_meme"
         for asset in _get("universe.tier_5_obscure", []):
-            tier_map[asset] = "tier_5_obscure"
+            tier_map[asset] = "tier5"     # Fixed to match config formatting
 
         tier_map["PAXG"] = "special"
         tier_map["TRUMP"] = "special"
@@ -299,22 +299,48 @@ class PortfolioConstructor:
         )
 
         # ----------------------------------------------------------
-        # Step 4: Apply trend penalties to momentum scores
+        # Step 4: Apply trend penalties to momentum scores (ALL ASSETS)
         # ----------------------------------------------------------
         adjusted_scores = self.trend_penalty.apply_penalties(momentum_scores)
-        logger.info(
-            "PORTFOLIO Step 4: trend penalties applied to %d scores",
-            len(adjusted_scores),
-        )
 
         # ----------------------------------------------------------
-        # Step 5: Rank and select top N assets
+        # Step 5: Rank and select top N assets (STRATIFIED SELECTION)
         # ----------------------------------------------------------
         max_holdings = self._get_max_holdings(regime)
-        candidates = self._rank_and_select(adjusted_scores, max_holdings)
+        
+        # 1. Group scores into their respective weight classes
+        tier1_scores = {}
+        tier2_scores = {}
+        tier3_scores = {}
+        
+        for asset, score in adjusted_scores.items():
+            tier = self._asset_tier_map.get(asset, "tier3") # Default to tier 3 if missing
+            if tier == "tier1":
+                tier1_scores[asset] = score
+            elif tier == "tier2":
+                tier2_scores[asset] = score
+            elif tier in ("tier3", "tier_1_2"): 
+                tier3_scores[asset] = score
+                
+        # 2. Dynamic Slot Allocation
+        # For a Bull Market (30 holdings): ~5 Tier1, ~10 Tier2, ~15 Tier3
+        # For a Bear Market (10 holdings): ~2 Tier1, ~3 Tier2, ~5 Tier3
+        t1_slots = min(5, max(1, max_holdings // 4))
+        t2_slots = min(12, max(2, max_holdings // 3))
+        t3_slots = max(0, max_holdings - t1_slots - t2_slots)
+        
+        # 3. Rank and select strictly within weight classes
+        candidates = []
+        candidates.extend(self._rank_and_select(tier1_scores, t1_slots))
+        candidates.extend(self._rank_and_select(tier2_scores, t2_slots))
+        candidates.extend(self._rank_and_select(tier3_scores, t3_slots))
+        
         logger.info(
-            "PORTFOLIO Step 5: selected %d/%d candidates (max=%d)",
-            len(candidates), len(adjusted_scores), max_holdings,
+            "PORTFOLIO Step 5: Stratified selection - T1:%d, T2:%d, T3:%d (Total %d/%d slots filled)",
+            min(len(tier1_scores), t1_slots),
+            min(len(tier2_scores), t2_slots),
+            min(len(tier3_scores), t3_slots),
+            len(candidates), max_holdings
         )
 
         # ----------------------------------------------------------
@@ -516,12 +542,12 @@ class PortfolioConstructor:
     ) -> dict[str, float]:
         """Size positions using inverse-volatility weighting.
 
-        Falls back to equal weight if volatility data is unavailable.
+        Gracefully handles missing volatility by substituting the maximum 
+        observed volatility of the pool to ensure safe sizing.
         """
         if not candidates or deployment <= 0:
             return {}
 
-        # Try inverse-vol sizing
         vols: dict[str, float] = {}
         if market_data is not None and hasattr(market_data, "get_asset_volatility"):
             for asset in candidates:
@@ -529,13 +555,33 @@ class PortfolioConstructor:
                 if vol is not None and vol > 0:
                     vols[asset] = vol
 
-        if len(vols) == len(candidates) and len(vols) > 0:
-            return self._inverse_vol_weights(candidates, deployment, vols)
+        # If we have NO volatility data at all, fallback to equal weight
+        if not vols:
+            n = len(candidates)
+            base = deployment / n
+            return {asset: base for asset in candidates}
 
-        # Equal-weight fallback
-        n = len(candidates)
-        base = deployment / n
-        return {asset: base for asset in candidates}
+        # Handle missing individual vols by assigning them the maximum 
+        # risk (highest volatility) observed in the current candidate pool.
+        max_vol = max(vols.values())
+        safe_vols = {}
+        
+        missing_count = 0
+        for asset in candidates:
+            if asset in vols:
+                safe_vols[asset] = vols[asset]
+            else:
+                safe_vols[asset] = max_vol
+                missing_count += 1
+                
+        if missing_count > 0:
+            logger.warning(
+                "PORTFOLIO: %d assets missing 24h vol data. Assigned max pool "
+                "volatility (%.4f) for safe sizing.", 
+                missing_count, max_vol
+            )
+
+        return self._inverse_vol_weights(candidates, deployment, safe_vols)
 
     def _inverse_vol_weights(
         self,
@@ -688,10 +734,23 @@ class PortfolioConstructor:
         current_weights: dict[str, float],
     ) -> dict[str, float]:
         """Enforce maximum one-way turnover per rebalance.
-
         If turnover exceeds max, scale down all weight changes proportionally.
         """
         all_assets = set(target_weights.keys()) | set(current_weights.keys())
+
+        # FIX: Calculate total exposures to detect Risk-Off regime shifts
+        target_exposure_sum = sum(target_weights.values())
+        current_exposure_sum = sum(current_weights.values())
+
+        # If the regime dictates an emergency exposure reduction that exceeds 
+        # the turnover cap, bypass the speed limit to protect capital.
+        if (current_exposure_sum - target_exposure_sum) > self._max_turnover:
+            logger.warning(
+                "TURNOVER CAP BYPASSED: Emergency exposure reduction "
+                "(%.1f%% -> %.1f%%)",
+                current_exposure_sum * 100, target_exposure_sum * 100
+            )
+            return target_weights
 
         # Compute one-way turnover
         turnover = 0.0

@@ -222,7 +222,9 @@ class TrailingStopManager:
         return self.get_effective_stop_distance(
             base_stop_pct=pos.base_stop_pct,
             entry_price=pos.entry_price,
-            current_price=current_price,
+            # FIX: Use peak_price to determine maximum achieved PnL. 
+            # This guarantees the stop acts as a one-way ratchet and never widens.
+            current_price=pos.peak_price, 
             stop_override=endgame_stop_override,
             asset=pos.asset,
         )

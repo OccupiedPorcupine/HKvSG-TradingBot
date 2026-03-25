@@ -183,12 +183,18 @@ class RegimeDetector:
             )
             self._cold_start = False
 
-        # Input validation
+        # Input validation - FIXED: Use safe defaults instead of NaN to prevent 
+        # locking the regime during data accumulation phases.
+        safe_btc_4h = regime_inputs.btc_4h_return if regime_inputs.btc_4h_return is not None else 0.0
+        safe_btc_24h = regime_inputs.btc_24h_return if regime_inputs.btc_24h_return is not None else 0.0
+        safe_breadth = regime_inputs.altcoin_breadth if regime_inputs.altcoin_breadth is not None else 0.50
+        safe_vol = regime_inputs.btc_vol_percentile if regime_inputs.btc_vol_percentile is not None else 50.0
+        
         if not validate_regime_inputs(
-            regime_inputs.btc_4h_return if regime_inputs.btc_4h_return is not None else float("nan"),
-            regime_inputs.btc_24h_return if regime_inputs.btc_24h_return is not None else float("nan"),
-            regime_inputs.altcoin_breadth if regime_inputs.altcoin_breadth is not None else float("nan"),
-            regime_inputs.btc_vol_percentile if regime_inputs.btc_vol_percentile is not None else float("nan"),
+            safe_btc_4h,
+            safe_btc_24h,
+            safe_breadth,
+            safe_vol,
         ):
             logger.warning(
                 "REGIME: invalid inputs, keeping current regime %s",
@@ -305,6 +311,13 @@ class RegimeDetector:
         if contagion.is_small_portfolio:
             ratio_threshold = self._small_contagion_ratio
             loss_threshold = self._small_contagion_loss
+            
+            # FIX: Micro-Portfolio Contagion Trap
+            # If the bot only holds 1 or 2 assets, a normal 1.5% dip results in a 1.0 (100%) 
+            # contagion ratio, falsely triggering a systemic crisis. 
+            # We scale the loss threshold up to require a severe drop before panicking.
+            if contagion.contagion_ratio >= 0.99:
+                loss_threshold = max(loss_threshold, 0.03) # Require at least a 3% structural drop
         else:
             ratio_threshold = self._contagion_ratio_crisis
             loss_threshold = self._contagion_avg_loss_crisis
@@ -331,7 +344,7 @@ class RegimeDetector:
             and btc_24h is not None
             and breadth is not None
             and btc_4h > 0
-            # and btc_24h > 0
+            and btc_24h > 0
             and breadth > self._breadth_bull
         ):
             return RegimeType.TREND_BULL
@@ -342,12 +355,15 @@ class RegimeDetector:
             and btc_24h is not None
             and breadth is not None
             and btc_4h < 0
-            # and btc_24h < 0
+            and btc_24h < 0
             and breadth < self._breadth_bear
         ):
             return RegimeType.TREND_BEAR
 
         # Rule 5: Default
+        if btc_4h is None or breadth is None:
+            logger.info("REGIME WARM-UP: Missing 4h data. Defaulting to safe MEAN_REVERT state.")
+            
         return RegimeType.MEAN_REVERT
 
     # ------------------------------------------------------------------

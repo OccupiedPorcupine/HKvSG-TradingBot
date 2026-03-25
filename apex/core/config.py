@@ -120,7 +120,7 @@ class Config:
     def _validate(self) -> None:
         """Validate that required config sections exist."""
         required = [
-            "competition", "api", "universe", "tier_caps",
+            "competition", "api", "universe",
             "data_ingestion", "features", "regime", "signals",
             "portfolio", "risk", "execution", "logging",
         ]

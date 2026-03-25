@@ -1,19 +1,16 @@
 # =============================================================================
 # APEX — Autonomous Portfolio Execution Agent
-# Configuration File v3.2
+# Configuration File (Unified "Barbell" Hackathon Edition)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# COMPETITION
+# COMPETITION & API
 # -----------------------------------------------------------------------------
 competition:
   starting_capital_usd: 1_000_000     
   competition_end_utc: "2026-04-01T00:00:00Z"   
   competition_start_utc: "2026-03-22T00:00:00Z"  
 
-# -----------------------------------------------------------------------------
-# API
-# -----------------------------------------------------------------------------
 api:
   base_url: "https://mock-api.roostoo.com"  
   key_env_var: "ROOSTOO_API_KEY"
@@ -27,7 +24,7 @@ api:
   safe_mode_consecutive_429s: 5        
 
 # -----------------------------------------------------------------------------
-# UNIVERSE — asset tier classification
+# UNIVERSE
 # -----------------------------------------------------------------------------
 universe:
   tier_1_majors:
@@ -98,140 +95,114 @@ universe:
   pair_suffix: "/USD"
 
 # -----------------------------------------------------------------------------
-# TIER CAPS — max single-position weight as fraction of NAV
-# -----------------------------------------------------------------------------
-tier_caps:
-  tier_1_2: 0.08
-  tier_3: 0.06
-  tier_4_meme: 0.03
-  tier_5_obscure: 0.02
-  doge: 0.05          
-  trump: 0.02         
-  paxg: 0.15          
-  redistribution_max_iterations: 5  
-
-# -----------------------------------------------------------------------------
-# DATA INGESTION (Layer 1)
+# DATA INGESTION & FEATURES
 # -----------------------------------------------------------------------------
 data_ingestion:
   price_cadence_sec: 60                
   balance_cadence_sec: 300             
-  ring_buffer_maxlen: 1440             
+  ring_buffer_maxlen: 1500 # Changed from 1440 to add more headroom for calculation             
   missing_bar_fill_forward_limit: 3    
   price_anomaly_threshold_std: 5.0     
   stale_data_max_age_sec: 300          
   heartbeat_stale_threshold_sec: 180   
 
-# -----------------------------------------------------------------------------
-# FEATURE ENGINEERING (Layer 2)
-# -----------------------------------------------------------------------------
 features:
   computation_timeout_sec: 5           
-
-  return_windows:
-    - 5       
-    - 15      
-    - 60      
-    - 240     
-    - 720     
-    - 1440    
-
+  return_windows: [5, 15, 60, 240, 720, 1440]
   ema_periods:
     fast: 20
     medium: 50
-    trend_fast: 15     
-    trend_slow: 60    
+    trend_fast: 30     
+    trend_slow: 120    
 
-  # UPDATED: Aggressive 1h/4h Momentum weights as per your strategy
+  # THE BARBELL MOMENTUM: Catches fast altcoins while remembering Major trends
   momentum_composite_weights:
-    rank_1h: 0.70
-    rank_4h: 0.20
-    rank_12h: 0.10
+    rank_1h: 0.30
+    rank_4h: 0.50
+    rank_12h: 0.20
     rank_24h: 0.00
 
-  volatility_windows:
-    - 60      
-    - 240     
-    - 1440    
-
+  volatility_windows: [60, 240, 1440]
   btc_vol_percentile_lookback_days: 7
   btc_vol_percentile_sample_interval_min: 5
-  ml_zscore_lookback: 100
 
 # -----------------------------------------------------------------------------
-# REGIME DETECTION (Layer 3) # obsolete, replaced with phase 2
+# REGIME DETECTION (Unified)
 # -----------------------------------------------------------------------------
 regime:
-  update_cadence_sec: 300              
-
-  thresholds:
-    contagion_ratio_crisis: 0.80       
-    contagion_avg_loss_pct: 0.01       
-    btc_vol_percentile_crisis: 90      
-    altcoin_breadth_bull: 0.55         
-    altcoin_breadth_bear: 0.40         
-
-  transitions:
-    upgrade_confirmation_bars: 30      
-    crisis_exit_contagion_below: 0.50  
-    crisis_exit_vol_below: 70          
-    crisis_exit_confirmation_bars: 30  
-
+  btc_symbol: "BTC"
+  update_cadence_sec: 300 
+  breadth_bull_threshold: 0.35         # Lowered to buy the bounce easily
+  breadth_bear_threshold: 0.25         
+  contagion_ratio_threshold: 0.80
+  contagion_loss_threshold: 0.01       
+  contagion_small_portfolio_size: 6
+  contagion_small_ratio_threshold: 0.90
+  contagion_small_loss_threshold: 0.015
+  btc_vol_crisis_percentile: 90
+  upgrade_persistence_minutes: 5       # 5-minute fast trigger for Hackathon
+  crisis_exit_persistence_minutes: 5  
   contagion_return_window_min: 5       
 
 # -----------------------------------------------------------------------------
-# SIGNAL GENERATION (Layer 4)
+# SIGNALS & TREND PENALTY
 # -----------------------------------------------------------------------------
 signals:
   top_n_selections:
-    trend_bull: 10
-    mean_revert: 6
-    trend_bear: 4
+    trend_bull: 30
+    mean_revert: 20
+    trend_bear: 10
     crisis: 0
-
   hysteresis_buffer: 3
-
-  # UPDATED: Relaxed volatility blockade from 2.0 to 5.0
-  vol_exclusion_multiplier: 5.0
-
+  vol_exclusion_multiplier: 5.0        # Relaxed to allow buying volatile recoveries
   sentiment_overlay_enabled: true
   sentiment_crowded_penalty: -0.15
   sentiment_reversal_bonus: 0.10
-
   trend_penalty_magnitude: -0.30       
 
-  meme_pool:
-    allocation_pct: 0.03               
-    max_selections: 2                  
-    trailing_stop_pct: 0.12            # UPDATED to 12%
-    active_regimes:
-      - TREND_BULL
+trend_penalty:
+  # Relaxed to 30/120 to prevent penalizing BTC/ETH during short resting periods
+  ema_short_period: 30                 
+  ema_long_period: 120                  
+  penalty_sigma: -0.3
+  broad_downturn_threshold: 0.70       
+  broad_downturn_penalty_sigma: -0.15
 
-  tier5_pool:
-    activation_4h_return_threshold: 0.10  
-    activation_rank_top_n: 3              
-    allocation_pct_min: 0.01              
-    allocation_pct_max: 0.02              
-    max_selections: 2                     
-    trailing_stop_pct: 0.12               # UPDATED to 12%
-    active_regimes:
-      - TREND_BULL
+meme_pool:
+  enabled: true
+  symbols: ["SHIB", "PEPE", "FLOKI", "WIF", "BONK", "PUMP", "PENGU", "1000CHEEMS"]
+  allocation_pct: 0.03               
+  max_allocation_per_coin: 0.03
+  top_n: 2                  
+  trailing_stop_pct: 0.12            
+  active_regimes: ["TREND_BULL"]
 
-  ml:
-    enabled: false
-    multiplier_high: 1.3                  
-    multiplier_low: 0.5                   
-    multiplier_default: 1.0               
-    probability_threshold_high: 0.65
-    probability_threshold_low: 0.45
-    ic_halt_threshold: 0.02               
-    ic_resume_threshold: 0.04             
-    ic_resume_window_hr: 12               
+tier5_pool:
+  activation_4h_return_threshold: 0.10  
+  activation_rank_top_n: 3              
+  allocation_pct_min: 0.01              
+  allocation_pct_max: 0.02              
+  max_selections: 2                     
+  trailing_stop_pct: 0.12               
+  active_regimes: ["TREND_BULL"]
 
 # -----------------------------------------------------------------------------
-# PORTFOLIO CONSTRUCTION (Layer 5) --> Overwritten by Phase2
+# PORTFOLIO CONSTRUCTION (Unified block)
 # -----------------------------------------------------------------------------
 portfolio:
+  exposure:
+    TREND_BULL: 1.00                   
+    TREND_BULL_RISING_VOL: 0.85
+    MEAN_REVERT: 0.75
+    TREND_BEAR: 0.35
+    HIGH_VOL_CRISIS: 0.15
+
+  holdings:
+    TREND_BULL: 30
+    MEAN_REVERT: 20
+    TREND_BEAR: 10
+    HIGH_VOL_CRISIS: 0
+
   regime_targets:
     trend_bull_low_vol: 0.80             
     trend_bull_high_vol: 0.65            
@@ -240,64 +211,46 @@ portfolio:
     crisis: 0.15                         
 
   btc_vol_high_vol_threshold: 70
-  max_crypto_exposure: 0.90
+  max_crypto_exposure: 1.00
+
+  # SPEED LIMIT: Stop 100% turnover fee bleed. Only swap 15% of the portfolio at a time.
+  turnover_max_pct: 0.35                 
+  min_trade_threshold_pct_nav: 0.002     
+  rebalance_cadence_sec: 300             
 
   paxg_allocation:
-    trend_bull: 0.05
-    mean_revert: 0.10
-    trend_bear: 0.12
-    crisis: 0.15
+    trend_bull: 0.00
+    mean_revert: 0.04
+    trend_bear: 0.125
+    crisis: 0.125
     hard_cap: 0.15
 
-  adaptive_exposure:
-    enabled: false                       
-    naive_benchmark_exposure: 0.70       
-    gap_threshold_small: 0.02            
-    gap_threshold_large: 0.04            
-    adjustment_small: 0.10
-    adjustment_large: 0.20
-    min_days_remaining_small: 5          
-    min_days_remaining_large: 3          
-
-  beta_targeting:
-    enabled: false                       
-    target_trend_bull_min: 0.40
-    target_trend_bull_max: 0.60
-    target_other_max: 0.30
-    adjustment_trigger_above: 0.10       
-    regression_window_days: 7
-    benchmarks:
-      - "BTC"
-      - "equal_weighted"
-
-  max_turnover_per_rebalance: 0.25       
-  min_trade_threshold_pct_nav: 0.002     
-  rebalance_cadence_sec: 3600          
+  tier_caps:
+    tier1: 0.50           # 50% max allocation to safe heavyweights
+    tier1_doge: 0.05
+    tier2: 0.15           # 15% max allocation to Tier 2
+    tier3: 0.05           
+    tier4_meme: 0.01      # Restrict junk coins
+    tier5: 0.01           
+    trump: 0.02
+    paxg: 0.15
 
 # -----------------------------------------------------------------------------
-# END-GAME DE-RISKING (Layer 5, hardcoded schedule)
+# END-GAME DE-RISKING (Unified)
 # -----------------------------------------------------------------------------
 endgame:
+  round_end_utc: "2026-03-31T23:59:00Z"
+  final_sell_minutes_remaining: 15  
   schedule:
-    - hours_remaining: 48
-      max_exposure: 0.70
-      stop_override: null                
-    - hours_remaining: 24
-      max_exposure: 0.45
-      stop_override: null
-    - hours_remaining: 12
-      max_exposure: 0.25
-      stop_override: 0.03               
-    - hours_remaining: 4
-      max_exposure: 0.15
-      stop_override: 0.02               
-    - hours_remaining: 1
-      max_exposure: 0.15
-      stop_override: 0.02
-  final_sell_minutes_remaining: 15       
+    - { hours_remaining: 48, max_exposure: 1.0, stop_override: null }
+    - { hours_remaining: 24, max_exposure: 0.70, stop_override: null }
+    - { hours_remaining: 12, max_exposure: 0.45, stop_override: null }
+    - { hours_remaining: 4, max_exposure: 0.25, stop_override: 0.03 }
+    - { hours_remaining: 1, max_exposure: 0.15, stop_override: 0.02 }
+    - { hours_remaining: 0.25, max_exposure: 0.0, stop_override: null }
 
 # -----------------------------------------------------------------------------
-# RISK MANAGEMENT (Layer 6)
+# RISK & STOPS
 # -----------------------------------------------------------------------------
 risk:
   portfolio_limits:
@@ -306,22 +259,15 @@ risk:
     daily_loss_soft_warning: 0.03        
     daily_loss_hard_reduce: 0.05         
     crypto_exposure_soft_warning: 0.85
-    crypto_exposure_hard_sell: 0.90
+    crypto_exposure_hard_sell: 1.00
     single_asset_loss_soft: 0.04         
     single_asset_loss_hard: 0.06         
 
-  # UPDATED: 12% Trailing Stops across the board
   trailing_stops:
-    tier_1_3: 0.12                       
-    tier_4_5: 0.12                       
-    trump: 0.10                          
+    tier_1_3: 0.08                       
+    tier_4_5: 0.08                       
+    trump: 0.06                          
     minimum_floor: 0.02                  
-
-  stop_tightening:
-    threshold_high_pnl: 0.02
-    tightening_high: 0.40
-    threshold_medium_pnl: 0.01
-    tightening_medium: 0.20
 
   drawdown_recovery:
     halt_cooldown_hr: 2                  
@@ -335,18 +281,25 @@ risk:
 
   check_cadence_sec: 60                  
 
+dynamic_stops:
+  tighten_high_threshold: 0.05         
+  tighten_high_factor: 0.60            
+  tighten_mid_threshold: 0.025         
+  tighten_mid_factor: 0.80             
+  min_stop_floor: 0.02                 
+
 # -----------------------------------------------------------------------------
-# EXECUTION ENGINE (Layer 7)
+# EXECUTION ENGINE (TRAFFIC CONTROL ENABLED)
 # -----------------------------------------------------------------------------
 execution:
   order_timeout_sec: 120                  
   max_resubmissions: 2                   
   risk_exit_acceleration_threshold: 0.02 
-  max_simultaneous_orders: 10           
+  max_simultaneous_orders: 10           # Throttles API to prevent bans
   fill_check_delay_sec: 20               
 
 # -----------------------------------------------------------------------------
-# ADAPTATION & MONITORING (Layer 8)
+# ADAPTATION & ORCHESTRATION
 # -----------------------------------------------------------------------------
 adaptation:
   signal_health:
@@ -368,38 +321,6 @@ adaptation:
   performance_snapshot_cadence_hr: 1
   parquet_backup_cadence_hr: 1
 
-# -----------------------------------------------------------------------------
-# ML RETRAINING (Layer 8, Phase 3 only)
-# -----------------------------------------------------------------------------
-ml_retrain:
-  enabled: false                         
-  cadence_hr: 24                         
-  training_lookback_days: 60             
-  target: "sign_4h_return"               
-  hyperparameters:
-    max_depth: 6
-    min_child_samples: 50
-    feature_fraction: 0.7
-    n_estimators: 500
-    early_stopping_rounds: 50
-  sanity_check:
-    data_window_min: 5                   
-    std_threshold: 2.0                   
-  historical_data_path: "data/historical_ohlcv.parquet"
-  model_save_path: "models/lightgbm_latest.pkl"
-
-# -----------------------------------------------------------------------------
-# PHASE 1 — MINIMAL VOL GUARD (used before Phase 2 regime detection)
-# -----------------------------------------------------------------------------
-phase1_vol_guard:
-  btc_30d_median_vol: 0.0              
-  vol_spike_multiplier: 2.0             
-  defensive_max_exposure: 0.40          
-  normal_max_exposure: 0.75             
-
-# -----------------------------------------------------------------------------
-# ORCHESTRATION
-# -----------------------------------------------------------------------------
 orchestration:
   data_ingestion_timeout_sec: 10         
   minimum_activity_check_hr: 24          
@@ -407,7 +328,7 @@ orchestration:
   max_consecutive_failures: 3            
 
 # -----------------------------------------------------------------------------
-# LOGGING
+# LOGGING & PATHS
 # -----------------------------------------------------------------------------
 logging:
   level: "DEBUG"
@@ -420,118 +341,15 @@ logging:
   heartbeat_file: "logs/heartbeat"
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
-# -----------------------------------------------------------------------------
-# PORTFOLIO BREAKDOWN — periodic debug log of current portfolio weights
-# -----------------------------------------------------------------------------
 portfolio_breakdown:
   enabled: true
   cadence_sec: 60                       
 
-# -----------------------------------------------------------------------------
-# DEBUG TICK — temporary price heartbeat logged every 60s
-# -----------------------------------------------------------------------------
-debug_tick:
-  enabled: false
-  watch_assets:          
-    - BTC
-    - ETH
-    - SOL
-    - DOGE
-
-# -----------------------------------------------------------------------------
-# PATHS
-# -----------------------------------------------------------------------------
 paths:
   parquet_backup: "data/price_backup.parquet"
   historical_data: "data/historical_ohlcv.parquet"
   model_dir: "models/"
 
-# -----------------------------------------------------------------------------
-# RANDOM SEEDS (for reproducibility)
-# -----------------------------------------------------------------------------
 random_seeds:
   numpy: 42
   lightgbm: 42
-
-# ============================================================
-# PHASE 2 PARAMETERS
-# ============================================================
-
-regime:
-  btc_symbol: "BTC"
-  breadth_bull_threshold: 0.35         
-  breadth_bear_threshold: 0.25         
-  contagion_ratio_threshold: 0.80
-  contagion_loss_threshold: 0.01       
-  contagion_small_portfolio_size: 6
-  contagion_small_ratio_threshold: 0.90
-  contagion_small_loss_threshold: 0.015
-  btc_vol_crisis_percentile: 90
-  upgrade_persistence_minutes: 5      
-  crisis_exit_persistence_minutes: 5  
-
-trend_penalty:
-  ema_short_period: 15                 
-  ema_long_period: 60                  
-  penalty_sigma: -0.3
-  broad_downturn_threshold: 0.70       
-  broad_downturn_penalty_sigma: -0.15
-
-meme_pool:
-  enabled: true
-  symbols: ["SHIB", "PEPE", "FLOKI", "WIF", "BONK", "PUMP", "PENGU"]
-  max_allocation_per_coin: 0.03
-  top_n: 2
-  active_regimes: ["TREND_BULL"]
-  trailing_stop_pct: 0.12              # UPDATED to 12%
-
-dynamic_stops:
-  tighten_high_threshold: 0.05         
-  tighten_high_factor: 0.60            
-  tighten_mid_threshold: 0.025         
-  tighten_mid_factor: 0.80             
-  min_stop_floor: 0.02                 
-
-paxg:
-  symbol: "PAXG"
-  allocation:
-    TREND_BULL: 0.04                   
-    MEAN_REVERT: 0.075                 
-    TREND_BEAR: 0.125                  
-    HIGH_VOL_CRISIS: 0.125             
-  rebalance_tolerance: 0.01            
-
-endgame:
-  schedule:
-    - { hours_remaining: 48, max_exposure: 1.0, stop_override: null }
-    - { hours_remaining: 24, max_exposure: 0.70, stop_override: null }
-    - { hours_remaining: 12, max_exposure: 0.45, stop_override: null }
-    - { hours_remaining: 4, max_exposure: 0.25, stop_override: 0.03 }
-    - { hours_remaining: 1, max_exposure: 0.15, stop_override: 0.02 }
-    - { hours_remaining: 0.25, max_exposure: 0.0, stop_override: null }
-  round_end_utc: "2026-03-31T23:59:00Z"
-
-portfolio:
-  exposure:
-    TREND_BULL: 1.00                   
-    TREND_BULL_RISING_VOL: 0.85
-    MEAN_REVERT: 0.75
-    TREND_BEAR: 0.35
-    HIGH_VOL_CRISIS: 0.15
-  holdings:
-    TREND_BULL: 30
-    MEAN_REVERT: 20
-    TREND_BEAR: 10
-    HIGH_VOL_CRISIS: 0
-  turnover_max_pct: 1.00 
-  min_trade_nav_pct: 0.002
-  rebalance_cadence_sec: 300 
-  tier_caps:
-    tier1: 0.50           
-    tier1_doge: 0.05
-    tier2: 0.15           
-    tier3: 0.05           
-    tier4_meme: 0.01      
-    tier5: 0.01           
-    trump: 0.02
-    paxg: 0.15
