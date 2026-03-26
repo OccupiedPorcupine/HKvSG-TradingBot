@@ -333,9 +333,9 @@ risk:
     single_asset_loss_hard: 0.06         
 
   trailing_stops:
-    tier_1_3: 0.12                       
-    tier_4_5: 0.12                       
-    trump: 0.10                          
+    tier_1_3: 0.06                       
+    tier_4_5: 0.06                       
+    trump: 0.04                          
     minimum_floor: 0.02                  
 
   drawdown_recovery:
