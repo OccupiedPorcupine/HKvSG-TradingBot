@@ -108,7 +108,7 @@ universe:
 data_ingestion:
   price_cadence_sec: 60                
   balance_cadence_sec: 300             
-  ring_buffer_maxlen: 1440             
+  ring_buffer_maxlen: 1500             
   missing_bar_fill_forward_limit: 3    
   price_anomaly_threshold_std: 5.0     
   stale_data_max_age_sec: 300          
