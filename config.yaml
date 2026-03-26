@@ -130,8 +130,8 @@ features:
     trend_slow: 60    
   momentum_composite_weights:
     rank_1h: 0.70
-    rank_4h: 0.20
-    rank_12h: 0.10
+    rank_4h: 0.30
+    rank_12h: 0.00
     rank_24h: 0.00
   volatility_windows:
     - 60      
@@ -290,7 +290,7 @@ portfolio:
 paxg:
   symbol: "PAXG"
   allocation:
-    TREND_BULL: 0.04                   
+    TREND_BULL: 0.02                   
     MEAN_REVERT: 0.075                 
     TREND_BEAR: 0.125                  
     HIGH_VOL_CRISIS: 0.125             
