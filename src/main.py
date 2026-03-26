@@ -476,21 +476,31 @@ async def main():
                 return
 
         # 1. Get raw momentum and sentiment
-        scores = feature_engine.get_momentum_scores()
+        raw_scores = feature_engine.get_momentum_scores()
         sentiment = feature_engine.get_sentiment_scores()
 
-        # Apply Sentiment Overlay directly to scores before portfolio construction
+        # --- NEW: Build the Tier 1-3 Filter List ---
+        t1 = config.get("universe.tier_1_majors", [])
+        t2 = config.get("universe.tier_2_large_alts", [])
+        t3 = config.get("universe.tier_3_defi", [])
+        tier_1_3 = set(t1 + t2 + t3)
+
+        # Apply Sentiment AND filter out Tier 4/5 (Meme/Obscure)
+        scores = {}
         sentiment_penalty = config.get("signals.sentiment_crowded_penalty", -0.15)
         sentiment_bonus = config.get("signals.sentiment_reversal_bonus", 0.10)
         
-        for asset, sent_score in sentiment.items():
-            if asset in scores:
+        for asset, score in raw_scores.items():
+            if asset in tier_1_3:  # Now this works perfectly!
+                sent_score = sentiment.get(asset, 0.5)
                 if sent_score > 0.90:  # Crowded long
-                    scores[asset] += sentiment_penalty
+                    scores[asset] = score + sentiment_penalty
                     logger.debug("SENTIMENT PENALTY: %s (score: %.2f)", asset, sent_score)
                 elif sent_score < 0.15:  # Oversold / Panic
-                    scores[asset] += sentiment_bonus
+                    scores[asset] = score + sentiment_bonus
                     logger.debug("SENTIMENT BONUS: %s (score: %.2f)", asset, sent_score)
+                else:
+                    scores[asset] = score
 
         # Update order manager context for logging
         order_manager.update_context(
