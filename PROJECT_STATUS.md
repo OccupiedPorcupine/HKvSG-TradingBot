@@ -1,5 +1,10 @@
 # APEX — Project Status
 
+> **Archived snapshot.** This page was last updated on March 19, 2026, two days before Round 1
+> started. The competition has since ended: APEX traded live through Round 1 and reached the top 5
+> of 100+ teams before falling back. The Phase 2/3 items below are as planned at that time.
+> See the [README](README.md) for the final summary.
+
 **As of: March 19, 2026**
 **Current Phase: Phase 1 (MVB) — ~90% Complete**
 **Competition Round 1 starts: March 21, 2026 (T-2 days)**
